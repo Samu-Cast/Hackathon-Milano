@@ -91,6 +91,7 @@ async def main(need: Need, city: City) -> None:
         clinical(text)
         and message.sender.startswith("citizen:")
         and not booking_tokens & set(fields_of(text))
+        and not _is_checkin(text)
     ):
         raise OutOfScope()
     case = await city.history(need_id=message.need_id)
@@ -180,12 +181,12 @@ async def handle(role: str, city: City, message: Message, chat: list[Message]) -
         # Specialista: risposta alla richiesta di consenso per il referto (sì o no).
         if role == "specialist_care":
             pending = _report_pending(chat, city.agent_id, message.sender)
-            if pending and "checkin" not in words(message.text):
+            if pending and not _is_checkin(message.text):
                 consent = fields_of(message.text).get("consent_ref") or _bare_consent(message.text)
                 await _file_report(city, message, chat, pending, consent if _valid_id(consent) else None)
                 return
         # Le prenotazioni passano dal CUP (ricetta verificata, consenso): niente hold diretti.
-        if "confirm" in words(message.text) and "checkin" not in words(message.text):
+        if "confirm" in words(message.text) and not _is_checkin(message.text):
             await _say(city, message.sender, _via_cup(chat))
             return
     if role in ("hospital", "specialist_care") and message.sender.startswith("agent:"):
@@ -212,6 +213,65 @@ async def handle(role: str, city: City, message: Message, chat: list[Message]) -
         await _facility(city, message, chat, reports=True, hold_self=False)
     elif role == "family_counseling":
         await _family(city, message, chat)
+
+
+# --- livello 3: check-in e lingua detti a parole (squadra epica) --------------------------------
+
+_CHECKIN_RE = re.compile(
+    r"\bcheck[\s-]?in\b|\bsono (?:arrivat[oa]|qui|in sala|allo sportello)\b|\beccomi\b|"
+    r"\bi'?m here\b|\bi am here\b|\bi(?: have|'ve) arrived\b|\bje suis (?:là|arrivée?)\b|"
+    r"\bestoy aquí\b|\bich bin da\b"
+)
+_LANG_WORDS = {
+    "en": {"the", "i", "i'm", "i'd", "my", "is", "and", "you", "hello", "hi", "please",
+           "appointment", "would", "like", "need", "doctor", "thank", "thanks", "want", "have",
+           "with", "for", "am", "here", "arrived"},
+    "fr": {"je", "bonjour", "merci", "rendez-vous", "voudrais", "mon", "ma", "médecin", "avec",
+           "pour", "suis", "j'ai", "est", "s'il", "vous", "besoin"},
+    "es": {"hola", "quiero", "cita", "gracias", "médico", "necesito", "tengo", "buenos", "días",
+           "quisiera", "estoy", "favor", "para"},
+    "de": {"ich", "hallo", "termin", "bitte", "danke", "arzt", "ärztin", "möchte", "mein",
+           "meine", "habe", "guten", "tag", "und", "bin"},
+    "it": {"il", "lo", "la", "di", "che", "ho", "vorrei", "buongiorno", "grazie", "sono",
+           "una", "mi", "ricetta", "salve", "visita", "medico", "della", "del", "non", "è",
+           "un", "le", "ci", "per"},
+}
+
+
+def _is_checkin(text: str) -> bool:
+    """Check-in con la parola dell'atto o detto a parole ("sono arrivato", "check-in")."""
+
+    lowered = " ".join(text.lower().replace("’", "'").split())
+    return "checkin" in words(text) or bool(_CHECKIN_RE.search(lowered))
+
+
+def _booking_in(text: str, chat: list[Message]) -> str:
+    """Il booking_id di un check-in detto a parole: un codice noto scritto nel testo, oppure
+    l'unica prenotazione di questo caso registrata sul Ledger."""
+
+    known: list[str] = []
+    for row in chat:
+        if row.sender == LEDGER and first_word(row.text) == "committed":
+            booking = fields_of(row.text).get("booking_id", "")
+            if booking and booking not in known:
+                known.append(booking)
+    said = words(text)
+    for booking in known:
+        if booking.lower() in said or booking in text:
+            return booking
+    if len(known) == 1:
+        return known[0]
+    hit = re.search(r"\b(?:bk|b|booking)-[A-Za-z0-9-]{1,60}\b", text)
+    return hit.group(0) if hit and _ID.fullmatch(hit.group(0)) else ""
+
+
+def _detect_lang(text: str) -> str:
+    tokens = [token.strip(".,;:!?()\"'«»") for token in text.lower().split()]
+    scores = {lang: sum(1 for token in tokens if token in vocab) for lang, vocab in _LANG_WORDS.items()}
+    best = max(scores, key=lambda lang: scores[lang])
+    if best == "it" or scores[best] < 2 or scores[best] <= scores["it"]:
+        return ""
+    return best
 
 
 # --- sicurezza, referto e controllo (squadra epica) -------------------------------------------
@@ -957,12 +1017,15 @@ def _number(chat: list[Message]) -> str | None:
 
 
 def _lang(chat: list[Message]) -> str:
+    """Il token lang= vince sempre; senza, la lingua si riconosce dalle parole (livello 3)."""
+
     for row in chat:
         if row.sender.startswith("citizen:"):
             lang = fields_of(row.text).get("lang", "")
             if lang:
                 return lang
-    return "it"
+    texts = " ".join(row.text for row in chat if row.sender.startswith("citizen:"))
+    return _detect_lang(texts) or "it"
 
 
 def _gender(chat: list[Message]) -> str | None:
@@ -1296,7 +1359,7 @@ def _facility_turn(message: Message) -> bool:
         return True
     if message.sender == LEDGER and head == "refused" and "hold" in kind:
         return True
-    if "checkin" in kind and message.sender.startswith("citizen:"):
+    if _is_checkin(message.text) and message.sender.startswith("citizen:"):
         return True
     return "confirm" in kind and (
         message.sender.startswith("agent:") or message.sender.startswith("citizen:")
@@ -1330,7 +1393,7 @@ async def _facility(
         await _on_checked_in(city, message, chat, reports=reports)
     elif message.sender == LEDGER and head == "reported":
         await _on_reported(city, message, chat)
-    elif "checkin" in kind and message.sender.startswith("citizen:"):
+    elif _is_checkin(message.text) and message.sender.startswith("citizen:"):
         await _on_checkin(city, message, chat, reports=reports)
     elif "confirm" in kind:
         await _on_confirm(city, message, chat, hold_self=hold_self)
@@ -1519,7 +1582,7 @@ async def _on_refused(
 
 
 async def _on_checkin(city: City, message: Message, chat: list[Message], *, reports: bool) -> None:
-    booking_id = fields_of(message.text).get("booking_id", "")
+    booking_id = fields_of(message.text).get("booking_id", "") or _booking_in(message.text, chat)
     citizen = message.sender if message.sender.startswith("citizen:") else _citizen(chat)
     if not booking_id or not citizen:
         return

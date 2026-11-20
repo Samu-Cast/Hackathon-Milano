@@ -403,11 +403,14 @@ def _number(chat: list[Message]) -> str | None:
 
 
 def _lang(chat: list[Message]) -> str:
+    """Il token lang= vince sempre; senza, la lingua si riconosce dalle parole (livello 3)."""
+
     for row in _from_citizen(chat):
         lang = fields_of(row.text).get("lang", "")
         if lang:
             return lang.lower()
-    return "it"
+    detected = _detect_lang(" ".join(row.text for row in _from_citizen(chat)))
+    return detected or "it"
 
 
 def _tone(chat: list[Message]) -> str:
@@ -507,10 +510,15 @@ def _preferences(
             continue
         after = asked is not None and index > asked
         fields = fields_of(row.text)
+        said_days, said_gender = _natural_prefs(row.text)  # "vorrei il martedì", "ideally a man"
         if after or "days" in fields or "day" in fields:
             days = _days_from(row.text) or days
+        elif said_days:
+            days = said_days
         if after or "gender" in fields or "gender_preference" in fields:
             gender = _gender_from(row.text) or gender
+        elif said_gender:
+            gender = said_gender
         if after:
             answered = True
     answered = answered or days is not None or gender is not None
@@ -1067,7 +1075,130 @@ def _chosen_offer(text: str, offers: dict[str, dict[str, str]]) -> str | None:
     for offer_id in sorted(offers, key=len, reverse=True):
         if offer_id.lower() in bare or offer_id in text:
             return offer_id
-    return None
+    return _natural_choice(text, offers)
+
+
+# --- livello 3: richieste in linguaggio naturale -------------------------------------------------
+
+_ORDINALS = (
+    (0, r"prim[ao]|first|1st|opzione\s*1|option\s*1|numero\s*1"),
+    (1, r"second[ao]|second|2nd|opzione\s*2|option\s*2|numero\s*2"),
+    (2, r"terz[ao]|third|3rd|opzione\s*3|option\s*3|numero\s*3"),
+    (-1, r"ultim[ao]|the\s+last(?:\s+one)?"),
+)
+_MONTHS = {name: i for i, name in enumerate(_MONTH_IT, start=1)} | {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6, "july": 7,
+    "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+}
+
+
+def _offer_at(offer: dict[str, str]) -> datetime | None:
+    return _when(offer.get("agenda_date", ""))
+
+
+def _natural_choice(text: str, offers: dict[str, dict[str, str]]) -> str | None:
+    """L'offerta indicata a parole: "la seconda", "quella di mercoledì", "alle 10", "il 17
+    novembre". Solo se la frase indica UNA offerta e non chiede altre date; altrimenti None (e
+    il CUP chiede quale, invece di indovinare)."""
+
+    lowered = _norm(text)
+    if not offers or _WANTS_MORE.search(lowered):
+        return None
+    slots = [oid for oid, offer in offers.items() if not offer.get("waiting_list")]
+    waiting = [oid for oid, offer in offers.items() if offer.get("waiting_list")]
+    if not slots:
+        # Solo la lista d'attesa sul tavolo: un sì a parole la sceglie.
+        return waiting[-1] if waiting and _choice_words(lowered) else None
+    latest = slots[-_MAX_OFFERS:]
+    picked: set[str] = set(slots)
+    named = ordinal = False
+    for index, pattern in _ORDINALS:
+        if re.search(rf"\b(?:{pattern})\b", lowered):
+            picked &= {latest[index]} if -len(latest) <= index < len(latest) else set()
+            named = ordinal = True
+            break
+    days = {code for code, names in _DAY_WORDS for name in names if len(name) > 3 and name in lowered}
+    if days:
+        picked &= {
+            oid for oid in slots
+            if (at := _offer_at(offers[oid])) is not None and _DAYS[at.weekday()] in days
+        }
+        named = True
+    hour = re.search(r"\b(?:alle|ore|at)\s*(\d{1,2})(?:[:.](\d{2}))?\b|\b(\d{1,2})[:.](\d{2})\b", lowered)
+    if hour:
+        h = int(hour.group(1) or hour.group(3))
+        m = int(hour.group(2) or hour.group(4) or 0)
+        picked &= {
+            oid for oid in slots
+            if (at := _offer_at(offers[oid])) is not None and (at.hour, at.minute) == (h, m)
+        }
+        named = True
+    date = re.search(r"\b(\d{1,2})\s*(?:/\s*(\d{1,2})\b|\s+([a-z]+))", lowered)
+    if date and (date.group(2) or date.group(3) in _MONTHS):
+        day = int(date.group(1))
+        month = int(date.group(2)) if date.group(2) else _MONTHS[date.group(3)]
+        picked &= {
+            oid for oid in slots
+            if (at := _offer_at(offers[oid])) is not None and (at.day, at.month) == (day, month)
+        }
+        named = True
+    if not named or len(picked) != 1:
+        return None
+    if not (ordinal or _choice_words(lowered) or re.search(r"\b(quell[ao]|that one|the one)\b", lowered)):
+        return None  # "martedì?" da solo è una preferenza, non una scelta
+    return picked.pop()
+
+
+# Lingua del cittadino quando non c'è il token lang=: parole tipiche di ogni lingua.
+_LANG_WORDS = {
+    "en": {"the", "i", "i'm", "i'd", "my", "is", "and", "you", "hello", "hi", "please",
+           "appointment", "would", "like", "need", "doctor", "thank", "thanks", "want", "have",
+           "with", "for", "am", "gave", "me"},
+    "fr": {"je", "bonjour", "merci", "rendez-vous", "voudrais", "mon", "ma", "médecin", "avec",
+           "pour", "suis", "j'ai", "est", "s'il", "vous", "besoin"},
+    "es": {"hola", "quiero", "cita", "gracias", "médico", "necesito", "tengo", "buenos", "días",
+           "quisiera", "estoy", "favor", "para"},
+    "de": {"ich", "hallo", "termin", "bitte", "danke", "arzt", "ärztin", "möchte", "mein",
+           "meine", "habe", "guten", "tag", "und", "einen"},
+    "pt": {"olá", "obrigado", "obrigada", "consulta", "gostaria", "preciso", "meu", "minha", "bom"},
+    "ro": {"bună", "mulțumesc", "programare", "vreau", "aș", "nevoie", "medic", "ziua"},
+    "it": {"il", "lo", "la", "di", "che", "ho", "vorrei", "buongiorno", "grazie", "sono",
+           "una", "mi", "ricetta", "salve", "visita", "medico", "della", "del", "non", "è",
+           "un", "le", "ci"},
+}
+
+
+def _detect_lang(text: str) -> str:
+    """La lingua più probabile del testo; "" se non si capisce (resta l'italiano)."""
+
+    tokens = [token.strip(".,;:!?()\"'«»") for token in text.lower().split()]
+    scores = {lang: sum(1 for token in tokens if token in vocab) for lang, vocab in _LANG_WORDS.items()}
+    best = max(scores, key=lambda lang: scores[lang])
+    if best == "it" or scores[best] < 2 or scores[best] <= scores["it"]:
+        return ""
+    return best
+
+
+# Una preferenza scritta a parole: "vorrei il martedì", "ideally on Monday", "una dottoressa".
+_PREF_MARK = re.compile(
+    r"\b(preferisc\w*|preferirei|vorrei|se possibile|meglio|magari|ideally|prefer\w*|would like|"
+    r"i'd like|rather|if possible|solo (?:il|di)|male doctor|female doctor|medico donna|"
+    r"medico uomo)\b"
+)
+_SINCE_DAY = re.compile(
+    r"\b(?:da|dal|dallo|since|from|scorso|scorsa|last)\s+(?:\w+\s+)?"
+    r"(?:luned\w*|marted\w*|mercoled\w*|gioved\w*|venerd\w*|monday|tuesday|wednesday|thursday|friday)"
+)
+
+
+def _natural_prefs(text: str) -> tuple[set[str] | None, str | None]:
+    """Giorni e genere detti a parole, solo se la frase li presenta come preferenza. "Mal di
+    schiena da martedì" non è una preferenza di giorno."""
+
+    lowered = _norm(text)
+    if not _PREF_MARK.search(lowered):
+        return None, None
+    return _days_from(_SINCE_DAY.sub(" ", lowered)), _gender_from(lowered)
 
 
 def _choice_words(text: str) -> bool:
@@ -1136,16 +1267,29 @@ async def _desk(city: City, message: Message, chat: list[Message]) -> None:
     if is_consent and _pending_choice(chat, city.agent_id, sender):
         await _locked(key, lambda: _on_confirm(city, message, chat, key, None))
         return
+    if _pending_choice(chat, city.agent_id, sender) and (
+        _we(chat, city.agent_id, "purpose=booking", to=sender, head="consent")
+        or _we(chat, city.agent_id, "purpose=cross_asst", to=sender, head="consent")
+    ):
+        # Risposta a parole alla nostra richiesta di consenso: la gestisce _on_confirm
+        # (un no detto a parole = niente prenotazione e niente dati fuori).
+        await _locked(key, lambda: _on_confirm(city, message, chat, key, None))
+        return
     if offers and not _number_in(text):
         new_prefs = _days_from(text) is not None or _gender_from(text) is not None
+        strong = re.search(
+            r"\b(prendo|scelgo|confermo|quell[ao]|la prima|la seconda|la terza|opzione|"
+            r"i'll take|i choose|that one|the one)\b", _norm(text),
+        )
+        if not _WANTS_MORE.search(text) and (strong or (_choice_words(text) and not new_prefs)):
+            # Una scelta a parole che non indica un'offerta sola ("va bene", "quella di
+            # martedì" con due martedì): chiedo quale, senza indovinare.
+            await _ask_which(city, sender, offers, tone)
+            return
         if _WANTS_MORE.search(text) or new_prefs:
             await _locked(
                 key, lambda: _advance(city, message, chat, key, replacing=False, refresh=True)
             )
-            return
-        if _choice_words(text):
-            # "Va bene la prima" senza identificatore: chiedo quale, senza indovinare.
-            await _ask_which(city, sender, offers, tone)
             return
     await _locked(key, lambda: _advance(city, message, chat, key, replacing=False))
 

@@ -88,12 +88,20 @@ async def _handle_turn(need: Need, city: City, message: Message) -> None:
             if not _we(case, city.agent_id, "reason=red_flag", to=sender, word="escalate.emergency"):
                 await _say(city, sender, _escalation_text(tone))
             return
-        if act == "checkin" or message.type == "checkin":
+        if act == "checkin" or message.type == "checkin" or (
+            _checkin_intent(message.text) and _booking_in(message.text, case)
+        ):
             await _on_checkin(city, message, case, reports=False)
             return
         fields = dict(interpreted.body) | fields_of(message.text)
         offers = _our_offers(case, city.agent_id)
         chosen = fields.get("offer_id") if fields.get("offer_id") in offers else None
+        if not chosen and offers and not _awaiting_consent(case, city.agent_id, sender):
+            # Livello 3: "prendo quello di martedì", "la seconda", "alle 10".
+            chosen = _natural_choice(message.text, offers)
+            if not chosen and _choice_like(message.text):
+                await _on_choice(city, message, case, None, None, offers, tone)  # chiede quale
+                return
         consent = fields.get("consent_ref") or _bare_consent(message.text)
         if not chosen and (
             act == "consent" or consent or _awaiting_consent(case, city.agent_id, sender)
@@ -500,12 +508,15 @@ def _withdrawn(chat: list[Message], agent: str) -> set[str]:
 
 
 def _lang(chat: list[Message]) -> str:
+    """Il token lang= vince sempre; senza, la lingua si riconosce dalle parole (livello 3)."""
+
     for row in chat:
         if row.sender.startswith("citizen:"):
             lang = fields_of(row.text).get("lang", "")
             if lang:
                 return lang
-    return "it"
+    texts = " ".join(row.text for row in chat if row.sender.startswith("citizen:"))
+    return _detect_lang(texts) or "it"
 
 
 def _gender(chat: list[Message]) -> str | None:
@@ -515,6 +526,11 @@ def _gender(chat: list[Message]) -> str | None:
         raw = fields_of(row.text).get("gender_preference") or fields_of(row.text).get("gender")
         if raw in {"m", "f"}:
             return raw
+    for row in chat:
+        if row.sender.startswith("citizen:"):
+            said = _natural_prefs(row.text)[1]
+            if said:
+                return said
     return None
 
 
@@ -530,7 +546,160 @@ def _preferred_days(chat: list[Message]) -> frozenset[str]:
         if isinstance(raw, (list, tuple)):
             days = frozenset(day.lower()[:3] for day in raw if isinstance(day, str))
             return days & {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+    for row in reversed(chat):
+        if row.sender.startswith("citizen:"):
+            said = _natural_prefs(row.text)[0]
+            if said:
+                return frozenset(said)
     return frozenset()
+
+
+# --- livello 3: richieste in linguaggio naturale -------------------------------------------------
+
+_DAY_NAMES = (
+    ("mon", ("lunedi", "lunedì", "monday")), ("tue", ("martedi", "martedì", "tuesday")),
+    ("wed", ("mercoledi", "mercoledì", "wednesday")), ("thu", ("giovedi", "giovedì", "thursday")),
+    ("fri", ("venerdi", "venerdì", "friday")),
+)
+_ORDINALS = (
+    (0, r"prim[ao]|first|1st|opzione\s*1|option\s*1"),
+    (1, r"second[ao]|second|2nd|opzione\s*2|option\s*2"),
+    (2, r"terz[ao]|third|3rd|opzione\s*3|option\s*3"),
+    (-1, r"ultim[ao]|the\s+last(?:\s+one)?"),
+)
+_CHOICE = re.compile(
+    r"\b(scelgo|prendo|confermo|accetto|va bene|ok|d'accordo|perfetto|quell[ao]|opzione|"
+    r"i choose|i'll take|i accept|that one|the one|yes|sì|si)\b"
+)
+_MORE = re.compile(
+    r"\b(nessuna|non (mi )?va(nno)? bene|altre date|altri giorni|altro giorno|altra data|"
+    r"none of (them|these)|other dates|another (day|date))\b"
+)
+_CHECKIN_RE = re.compile(
+    r"\bcheck[\s-]?in\b|\bsono (?:arrivat[oa]|qui|in sala|allo sportello)\b|\beccomi\b|"
+    r"\bi'?m here\b|\bi am here\b|\bi(?: have|'ve) arrived\b|\bje suis (?:là|arrivée?)\b|"
+    r"\bestoy aquí\b|\bich bin da\b"
+)
+_LANG_WORDS = {
+    "en": {"the", "i", "i'm", "i'd", "my", "is", "and", "you", "hello", "hi", "please",
+           "appointment", "would", "like", "need", "doctor", "thank", "thanks", "want", "have",
+           "with", "for", "am", "gave", "me"},
+    "fr": {"je", "bonjour", "merci", "rendez-vous", "voudrais", "mon", "ma", "médecin", "avec",
+           "pour", "suis", "j'ai", "est", "s'il", "vous", "besoin"},
+    "es": {"hola", "quiero", "cita", "gracias", "médico", "necesito", "tengo", "buenos", "días",
+           "quisiera", "estoy", "favor", "para"},
+    "de": {"ich", "hallo", "termin", "bitte", "danke", "arzt", "ärztin", "möchte", "mein",
+           "meine", "habe", "guten", "tag", "und", "einen"},
+    "pt": {"olá", "obrigado", "obrigada", "consulta", "gostaria", "preciso", "meu", "minha", "bom"},
+    "ro": {"bună", "mulțumesc", "programare", "vreau", "aș", "nevoie", "medic", "ziua"},
+    "it": {"il", "lo", "la", "di", "che", "ho", "vorrei", "buongiorno", "grazie", "sono",
+           "una", "mi", "ricetta", "salve", "visita", "medico", "della", "del", "non", "è",
+           "un", "le", "ci"},
+}
+_PREF_MARK = re.compile(
+    r"\b(preferisc\w*|preferirei|vorrei|se possibile|meglio|magari|ideally|prefer\w*|would like|"
+    r"i'd like|rather|if possible|solo (?:il|di)|ginecologa|dottoressa|female doctor|male doctor)\b"
+)
+_SINCE_DAY = re.compile(
+    r"\b(?:da|dal|since|from|scorso|scorsa|last)\s+(?:\w+\s+)?"
+    r"(?:luned\w*|marted\w*|mercoled\w*|gioved\w*|venerd\w*|monday|tuesday|wednesday|thursday|friday)"
+)
+
+
+def _low(text: str) -> str:
+    return " ".join(text.lower().replace("’", "'").split())
+
+
+def _detect_lang(text: str) -> str:
+    """La lingua più probabile del testo; "" se non si capisce (resta l'italiano)."""
+
+    tokens = [token.strip(".,;:!?()\"'«»") for token in text.lower().split()]
+    scores = {lang: sum(1 for token in tokens if token in vocab) for lang, vocab in _LANG_WORDS.items()}
+    best = max(scores, key=lambda lang: scores[lang])
+    if best == "it" or scores[best] < 2 or scores[best] <= scores["it"]:
+        return ""
+    return best
+
+
+def _natural_prefs(text: str) -> tuple[set[str] | None, str | None]:
+    """Giorni e genere detti a parole come preferenza ("se possibile di martedì")."""
+
+    lowered = _low(text)
+    if not _PREF_MARK.search(lowered):
+        return None, None
+    cleaned = _SINCE_DAY.sub(" ", lowered)
+    days = {code for code, names in _DAY_NAMES if any(name in cleaned for name in names)}
+    gender = None
+    if re.search(r"\b(ginecologa|dottoressa|una donna|medico donna|female doctor|a woman)\b", lowered):
+        gender = "f"
+    elif re.search(r"\b(un uomo|medico uomo|male doctor|a man)\b", lowered):
+        gender = "m"
+    return days or None, gender
+
+
+def _choice_like(text: str) -> bool:
+    lowered = _low(text)
+    return bool(_CHOICE.search(lowered)) and not _MORE.search(lowered)
+
+
+def _natural_choice(text: str, offers: dict[str, dict[str, str]]) -> str | None:
+    """L'offerta indicata a parole (ordinale, giorno, ora, data). Solo se è una sola."""
+
+    lowered = _low(text)
+    if _MORE.search(lowered):
+        return None
+    slots = [oid for oid, offer in offers.items() if offer.get("slot_id")]
+    waiting = [oid for oid, offer in offers.items() if offer.get("waiting_list")]
+    if not slots:
+        return waiting[-1] if waiting and _CHOICE.search(lowered) else None
+    latest = slots[-3:]
+    picked, named, ordinal = set(slots), False, False
+    for index, pattern in _ORDINALS:
+        if re.search(rf"\b(?:{pattern})\b", lowered):
+            picked &= {latest[index]} if -len(latest) <= index < len(latest) else set()
+            named = ordinal = True
+            break
+    days = {code for code, names in _DAY_NAMES if any(name in lowered for name in names)}
+    if days:
+        picked &= {oid for oid in slots if offers[oid].get("agenda_day") in days}
+        named = True
+    hour = re.search(r"\b(?:alle|ore|at)\s*(\d{1,2})(?:[:.](\d{2}))?\b|\b(\d{1,2})[:.](\d{2})\b", lowered)
+    if hour:
+        wanted = (int(hour.group(1) or hour.group(3)), int(hour.group(2) or hour.group(4) or 0))
+        picked &= {
+            oid for oid in slots
+            if (at := _when(offers[oid].get("agenda_date", ""))) is not None and (at.hour, at.minute) == wanted
+        }
+        named = True
+    if not named or len(picked) != 1:
+        return None
+    if not (ordinal or _CHOICE.search(lowered)):
+        return None
+    return picked.pop()
+
+
+def _checkin_intent(text: str) -> bool:
+    return bool(_CHECKIN_RE.search(_low(text)))
+
+
+def _booking_in(text: str, chat: list[Message]) -> str:
+    """Il booking_id del check-in detto a parole: il token, un codice noto scritto nel testo,
+    oppure l'unica prenotazione di questo caso registrata sul Ledger."""
+
+    token = fields_of(text).get("booking_id", "")
+    if _valid_ref(token):
+        return token
+    known: list[str] = []
+    for row in chat:
+        if row.sender == LEDGER and first_word(row.text) == "committed":
+            booking = fields_of(row.text).get("booking_id", "")
+            if booking and booking not in known:
+                known.append(booking)
+    said = words(text)
+    for booking in known:
+        if booking.lower() in said or booking in text:
+            return booking
+    return known[0] if len(known) == 1 else ""
 
 
 def _offer_line(slot: dict[str, str], number: str | None, priority: str | None) -> str:
@@ -1287,7 +1456,11 @@ async def _on_refused(
 
 
 async def _on_checkin(city: City, message: Message, chat: list[Message], *, reports: bool) -> None:
-    booking_id = fields_of(message.text).get("booking_id") or understood(message).body.get("booking_id", "")
+    booking_id = (
+        fields_of(message.text).get("booking_id")
+        or understood(message).body.get("booking_id", "")
+        or _booking_in(message.text, chat)  # check-in detto a parole
+    )
     citizen = message.sender if message.sender.startswith("citizen:") else _citizen(chat)
     # Non pretendo di aver mandato io la ricevuta: per una prenotazione fatta da un'ASST partner
     # la ricevuta l'ha girata il loro CUP. La validità la controlla il Ledger sul check-in.
