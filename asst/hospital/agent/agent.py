@@ -84,7 +84,14 @@ async def main(need: Need, city: City) -> None:
     if message is None:
         return
     text = message.text or need.summary
-    if clinical(text):
+    # Rifiuto solo una vera domanda clinica di un cittadino: un check-in o una conferma che
+    # nomina una "diagnosi" va registrato (rifiutarlo costa -2).
+    booking_tokens = {"booking_id", "slot_id", "offer_id", "consent_ref", "hold_id"}
+    if (
+        clinical(text)
+        and message.sender.startswith("citizen:")
+        and not booking_tokens & set(fields_of(text))
+    ):
         raise OutOfScope()
     case = await city.history(need_id=message.need_id)
     await handle(role_of(), city, message, case)
@@ -164,6 +171,14 @@ async def handle(role: str, city: City, message: Message, chat: list[Message]) -
     if street and _asks_address(message):
         await city.say(message.sender, f"address={street}")
         return
+    if role in ("hospital", "specialist_care") and message.sender.startswith("agent:"):
+        if first_word(message.text) == "need.request":
+            # Il CUP di un'altra ASST cerca posti: rispondo con i nostri slot (solo criteri).
+            await _serve_partner(city, message, chat, "VIS-FIS" if role == "hospital" else "VIS-CARD")
+            return
+        if "confirm" in words(message.text) and not _exact(chat, city.agent_id, _ACK):
+            # Risposta immediata al CUP, poi hold e commit sul Ledger.
+            await _say(city, message.sender, _ACK)
     if role == "gp":
         await _gp(city, message, chat)
     elif role == "booking_centre":
@@ -174,6 +189,68 @@ async def handle(role: str, city: City, message: Message, chat: list[Message]) -
         await _facility(city, message, chat, reports=True, hold_self=False)
     elif role == "family_counseling":
         await _family(city, message, chat)
+
+
+# --- rete tra ASST e risposta rapida (squadra epica) --------------------------------------------
+
+# Nessuna parola d'atto qui dentro: il CUP non deve leggerla come una richiesta nuova.
+_ACK = "Ricevuto, grazie: blocco subito il posto sul Ledger e vi mando la conferma firmata appena è pronta."
+
+
+async def _serve_partner(city: City, message: Message, chat: list[Message], default: str) -> None:
+    """Un CUP (di solito di un'altra ASST) chiede disponibilità. Rispondo con i miei slot liberi,
+    al massimo tre, senza chiedere né dare dati personali. Il confirm poi arriva a me."""
+
+    agent = city.agent_id
+    fields = fields_of(message.text)
+    procedure = fields.get("procedure") or default
+    request_id = fields.get("request_id") or message.need_id or message.msg_id
+    priority = (fields.get("priority") or "").upper() or None
+    lang = (fields.get("lang") or "it").lower()
+    tag = f"request_id={request_id}"
+    if _we(chat, agent, tag, to=message.sender, word="offer") or _we(
+        chat, agent, tag, to=message.sender, word="cancel"
+    ):
+        return
+    if not _has_agenda(chat) and not _exact(chat, agent, "agenda"):
+        await _say(city, LEDGER, "agenda")
+    if not _asked(chat, agent, procedure, 1):
+        await _say(city, LEDGER, f"world procedure={procedure} page=1")
+    chat = await _until(
+        city, message.need_id, chat,
+        lambda rows: _has_agenda(rows) and _latest_slots(rows) is not None,
+    )
+    now = _when((_ledger(chat, "agenda") or {}).get("agenda_now", ""))
+    world = _latest_slots(chat)
+    slots: list[dict[str, str]] = []
+    if now is not None and world is not None and priority != "P":
+        slots = fitting(
+            [line for line in world.splitlines() if "slot_id=" in line],
+            now=now, priority=priority, lang=lang, procedure=procedure,
+        )[:3]
+    if not slots:
+        await _say(
+            city, message.sender,
+            f"cancel {tag} procedure={procedure} reason=no_availability "
+            "Al momento non abbiamo posti liberi per questa prestazione nei tempi richiesti. Grazie!",
+        )
+        return
+    lines = []
+    for slot in slots:
+        parts = [
+            "offer", f"offer_id=px-{slot['slot_id']}", f"slot_id={slot['slot_id']}",
+            f"doctor_id={slot['doctor_id']}", f"facility={agent}", f"procedure={procedure}",
+            f"agenda_date={slot['at']}", f"agenda_day={slot.get('day', '')}",
+            f"expiry={slot['at']}", tag,
+        ]
+        if priority:
+            parts.append(f"priority={priority}")
+        lines.append(" ".join(part for part in parts if not part.endswith("=")))
+    lines.append(
+        "Ecco i nostri posti liberi (nessun dato del paziente richiesto finora). Per prenotare "
+        "mandateci confirm con offer_id, slot_id, citizen, consent_ref e prescription_number."
+    )
+    await _say(city, message.sender, "\n".join(lines))
 
 
 # --- shared ------------------------------------------------------------------------------------
@@ -1096,15 +1173,30 @@ async def _on_committed(city: City, message: Message, chat: list[Message]) -> No
     ledger_ref = fields.get("ledger_ref", "")
     if not booking_id or not ledger_ref:
         return
-    slot = fields.get("slot_id") or _hold_slot(chat, city.agent_id, fields.get("hold_id", ""))
+    # Il Ledger usa l'hold_id come booking_id: da lì ritrovo lo slot e chi l'ha chiesto.
+    slot = (
+        fields.get("slot_id")
+        or _hold_slot(chat, city.agent_id, fields.get("hold_id", ""))
+        or _hold_slot(chat, city.agent_id, booking_id)
+    )
     sender, _, _ = _booking_of(chat, city.agent_id, slot) if slot else ("", "", None)
+    # La ricevuta va a chi ha chiesto la prenotazione (il nostro CUP o quello di un'ASST
+    # partner), che la gira al cittadino con quando, dove e cosa fare.
     target = sender or _citizen(chat)
     if not target:
         return
     token = f"booking_id={booking_id}"
     if _we(chat, city.agent_id, token, to=target, word="booking.receipt"):
         return
-    note = _nota(chat, "ricevuta") if target.startswith("citizen:") else ""
+    if target.startswith("citizen:"):
+        note = _nota(chat, "ricevuta")
+    else:
+        offer_id = ""
+        for row in chat:
+            if row.sender == target and f"slot_id={slot}" in row.text.split():
+                offer_id = fields_of(row.text).get("offer_id", offer_id)
+        note = (f" slot_id={slot}" if slot else "") + (f" offer_id={offer_id}" if offer_id else "")
+        note += " Prenotazione registrata e firmata sul Ledger, grazie."
     await _say(city, target, f"booking.receipt booking_id={booking_id} ledger_ref={ledger_ref}{note}")
 
 
@@ -1129,7 +1221,11 @@ async def _on_refused(
         and not _we(chat, agent, f"offer_id={offer_id}", to=target, word="cancel")
     ):
         note = _nota(chat, "cancel") if target.startswith("citizen:") else ""
-        await _say(city, target, f"cancel offer_id={offer_id} reason=facility_cancelled{note}")
+        # Il codice del Ledger (es. PRESCRIPTION_EXPIRED) dice al CUP cosa fare: rinnovo,
+        # altro slot, consenso. Senza codice resta il motivo generico.
+        code = re.search(r"\b([A-Z][A-Z_]{3,})\b", message.text)
+        reason = code.group(1) if code else "facility_cancelled"
+        await _say(city, target, f"cancel offer_id={offer_id} slot_id={slot} reason={reason}{note}")
     if hold_self:
         await _advance(city, message, chat, fixed="CONS-GIN", replacing=True)
 
