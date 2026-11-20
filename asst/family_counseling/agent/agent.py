@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 
 from city_sdk.city import LEDGER, CapError, City, Message, Need, clinical, understood
 
-_MAX_PAGE = 8
+_MAX_PAGE = 16  # richieste di pagina per turno: ricerca binaria (~8) più qualche pagina in ordine
 
 
 _LEAD = timedelta(hours=4)
@@ -377,6 +377,83 @@ def _page(text: str) -> tuple[int, int]:
     return 1, 1
 
 
+def _page_spans(chat: list[Message]) -> tuple[dict[int, tuple[datetime | None, datetime | None]], int]:
+    """Per ogni pagina del mondo letta: primo e ultimo orario. Più il numero di pagine."""
+
+    spans: dict[int, tuple[datetime | None, datetime | None]] = {}
+    total = 0
+    for row in chat:
+        if row.sender != LEDGER or first_word(row.text) not in {"slots", "world"}:
+            continue
+        head = row.text.splitlines()[0] if row.text else ""
+        left, _, right = fields_of(head).get("page", "1/1").partition("/")
+        page = int(left) if left.isdigit() else 1
+        total = max(total, int(right) if right.isdigit() else 1)
+        times = []
+        for line in row.text.splitlines():
+            fields = fields_of(line)
+            if "slot_id" in fields:
+                at = _when(fields.get("at") or fields.get("agenda_date", ""))
+                if at is not None:
+                    times.append(at)
+        spans[page] = (min(times), max(times)) if times else (None, None)
+    return spans, total
+
+
+def _all_slot_lines(chat: list[Message]) -> list[str]:
+    """Le righe di slot di tutte le pagine lette (senza doppioni)."""
+
+    seen: set[str] = set()
+    lines: list[str] = []
+    for row in chat:
+        if row.sender != LEDGER or first_word(row.text) not in {"slots", "world"}:
+            continue
+        for line in row.text.splitlines():
+            slot = fields_of(line).get("slot_id")
+            if slot and slot not in seen:
+                seen.add(slot)
+                if "at" not in fields_of(line) and "agenda_date=" in line:
+                    line += " at=" + fields_of(line)["agenda_date"]
+                if "day" not in fields_of(line) and "agenda_day=" in line:
+                    line += " day=" + fields_of(line)["agenda_day"]
+                lines.append(line)
+    return lines
+
+
+def _searching(chat: list[Message], earliest: datetime) -> bool:
+    """True finché la ricerca binaria non ha trovato la PRIMA pagina con orari futuri."""
+
+    spans, _ = _page_spans(chat)
+    past = [p for p, (_, last) in spans.items() if last is not None and last < earliest]
+    future = sorted(p for p, (_, last) in spans.items() if last is not None and last >= earliest)
+    return bool(future) and future[0] > max(past, default=0) + 1
+
+
+def _next_page(chat: list[Message], earliest: datetime, limit: datetime | None) -> int | None:
+    """Quale pagina chiedere: ricerca binaria fino alla prima pagina con orari da ``earliest``
+    in poi (gli slot sono in ordine di data), poi in ordine finché supero ``limit``."""
+
+    spans, total = _page_spans(chat)
+    if not spans:
+        return 1
+    past = [p for p, (_, last) in spans.items() if last is not None and last < earliest]
+    future = sorted(p for p, (_, last) in spans.items() if last is not None and last >= earliest)
+    low = max(past, default=0)
+    if not future or future[0] > low + 1:
+        high = future[0] if future else total + 1
+        wanted = max((low + high) // 2, low + 1)
+        while wanted in spans and wanted < high:
+            wanted += 1
+        return wanted if wanted <= total and wanted not in spans else None
+    page = future[0]
+    while page in spans:
+        _, last = spans[page]
+        if limit is not None and last is not None and last >= limit:
+            return None
+        page += 1
+    return page if page <= total else None
+
+
 def _asked(chat: list[Message], agent: str, procedure: str, page: int) -> bool:
     token = f"page={page}"
     proc = f"procedure={procedure}"
@@ -704,14 +781,27 @@ async def _serve_partner(city: City, message: Message, case: list[Message]) -> N
         lambda rows: _has_agenda(rows) and _latest_slots(rows) is not None,
     )
     now = _when((_ledger(case, "agenda") or {}).get("agenda_now", ""))
-    world = _latest_slots(case)
+    lang = (fields.get("lang") or "it").lower()
     slots: list[dict[str, str]] = []
-    if now is not None and world is not None:
+    for _round in range(_MAX_PAGE):
+        if now is None or _latest_slots(case) is None:
+            break
         slots = fitting(
-            [line for line in world.splitlines() if "slot_id=" in line],
-            now=now, priority=None, lang=(fields.get("lang") or "it").lower(),
+            _all_slot_lines(case), now=now, priority=None, lang=lang,
             facility=agent, procedure=procedure,
         )[:3]
+        if slots and not _searching(case, now + _LEAD):
+            break
+        wanted = _next_page(case, now + _LEAD, now + timedelta(days=14))
+        if wanted is None:
+            break
+        if not _asked(case, agent, procedure, wanted):
+            await _say(city, LEDGER, f"world procedure={procedure} page={wanted}")
+        case = await _until(
+            city, message.need_id, case, lambda rows, wanted=wanted: wanted in _page_spans(rows)[0]
+        )
+        if wanted not in _page_spans(case)[0]:
+            break
     if not slots:
         await _say(
             city, message.sender,
@@ -847,6 +937,30 @@ async def _advance_alone(
     world = _latest_slots(fresh_replies(chat))
     if now is None or world is None:
         return
+    # Gara lunga (~64 giorni di catalogo): le prime pagine sono date passate. Sfoglio in questo
+    # stesso turno, saltando con la ricerca binaria alla prima pagina con orari da adesso in poi.
+    earliest = now + _LEAD
+    asked_now = {1}
+    for _round in range(_MAX_PAGE):
+        fresh = fresh_replies(chat)
+        if _all_slot_lines(fresh) and fitting(
+            _all_slot_lines(fresh), now=now, priority=None, lang=_lang(chat), facility=agent,
+            procedure=procedure,
+        ) and not _searching(fresh, earliest):
+            break
+        wanted = _next_page(fresh, earliest, now + timedelta(days=14))
+        if wanted is None or wanted in asked_now:
+            break
+        asked_now.add(wanted)
+        if replacing or not _asked(chat, agent, procedure, wanted):
+            await _say(city, LEDGER, f"world procedure={procedure} page={wanted}")
+        chat = await _until(
+            city, message.need_id, chat,
+            lambda rows, wanted=wanted: wanted in _page_spans(fresh_replies(rows))[0],
+        )
+        if wanted not in _page_spans(fresh_replies(chat))[0]:
+            break
+    world = "\n".join(_all_slot_lines(fresh_replies(chat)))
     # A cancel drops every offer the citizen was holding, so the ones still free are sent again,
     # once per cancel: a second turn for the same cancel or refusal does not repeat them.
     sent = _sent(key)
@@ -886,10 +1000,6 @@ async def _advance_alone(
                 sent.again.update(slot["slot_id"] for slot in picked)
         return
     if taken and not replacing:
-        return
-    page, pages = _page(world)
-    if page < pages and page < _MAX_PAGE and not _asked(chat, agent, procedure, page + 1):
-        await _say(city, LEDGER, f"world procedure={procedure} page={page + 1}")
         return
     # Nessun orario libero: lo dico chiaramente e propongo la lista d'attesa (alternativa).
     offer_id = f"wl-{key}"

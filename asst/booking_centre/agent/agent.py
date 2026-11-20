@@ -44,7 +44,7 @@ _LOG = logging.getLogger("booking_centre")
 # un minuto e mezzo reale, abbastanza per scelta, hold e commit.
 _LEAD = timedelta(minutes=90)
 _DEADLINE_DAYS = {"B": 2, "D": 5}
-_MAX_PAGE = 8
+_MAX_PAGE = 16  # richieste di pagina per turno: ricerca binaria (~8) più qualche pagina in ordine
 _MAX_OFFERS = 3
 _MAX_PARTNERS = 4
 _PULL_TRIES = 24
@@ -573,12 +573,71 @@ def _speaks(langs: frozenset[str], lang: str) -> bool:
     return "*" in langs and lang not in {"it", "en"}
 
 
-def _horizon(now: datetime, priority: str | None) -> datetime | None:
+def _horizon(now: datetime, priority: str | None, extend: bool = False) -> datetime | None:
+    """Scadenza della priorità. ``extend``: conto i giorni di agenda (senza sabato e domenica,
+    che nell'agenda non esistono): giovedì + 2 arriva a lunedì invece che a sabato."""
+
     if priority == "U":
         return now.replace(hour=23, minute=59, second=59, microsecond=0)
     if priority == "P":
         return None
-    return now + timedelta(days=_DEADLINE_DAYS.get(priority or "", 14))
+    days = _DEADLINE_DAYS.get(priority or "", 14)
+    if not extend:
+        return now + timedelta(days=days)
+    end, counted = now, 0
+    while counted < days:
+        end += timedelta(days=1)
+        if end.weekday() < 5:
+            counted += 1
+    return end
+
+
+def _page_spans(chat: list[Message]) -> tuple[dict[int, tuple[datetime | None, datetime | None]], int]:
+    """Per ogni pagina del mondo già letta: primo e ultimo orario. Più il numero di pagine."""
+
+    spans: dict[int, tuple[datetime | None, datetime | None]] = {}
+    total = 0
+    for row in chat:
+        if row.sender != LEDGER or first_word(row.text) not in {"slots", "world"}:
+            continue
+        head = row.text.splitlines()[0] if row.text else ""
+        left, _, right = fields_of(head).get("page", "1/1").partition("/")
+        page = int(left) if left.isdigit() else 1
+        total = max(total, int(right) if right.isdigit() else 1)
+        times = [
+            _when(slot["at"])
+            for slot in (normalize_slot(fields_of(line)) for line in row.text.splitlines())
+            if slot is not None
+        ]
+        times = [at for at in times if at is not None]
+        spans[page] = (min(times), max(times)) if times else (None, None)
+    return spans, total
+
+
+def _next_page(chat: list[Message], earliest: datetime, limit: datetime | None) -> int | None:
+    """Quale pagina chiedere adesso. Con una gara lunga le prime pagine sono date passate:
+    se gli slot sono in ordine di data salto a metà (ricerca binaria) fino alla prima pagina
+    con date da ``earliest`` in poi, poi proseguo in ordine finché supero ``limit``."""
+
+    spans, total = _page_spans(chat)
+    if not spans:
+        return 1
+    past = [page for page, (_, last) in spans.items() if last is not None and last < earliest]
+    future = sorted(page for page, (_, last) in spans.items() if last is not None and last >= earliest)
+    low = max(past, default=0)
+    if not future or future[0] > low + 1:
+        high = future[0] if future else total + 1
+        wanted = max((low + high) // 2, low + 1)
+        while wanted in spans and wanted < high:
+            wanted += 1
+        return wanted if wanted <= total and wanted not in spans else None
+    page = future[0]
+    while page in spans:
+        first, last = spans[page]
+        if limit is not None and last is not None and last >= limit:
+            return None  # oltre la scadenza: inutile sfogliare ancora
+        page += 1
+    return page if page <= total else None
 
 
 def normalize_slot(raw: dict[str, str]) -> dict[str, str] | None:
@@ -618,12 +677,13 @@ def fitting(
     gender: str | None = None,
     skip: set[str] | frozenset[str] = frozenset(),
     skip_facilities: set[str] | frozenset[str] = frozenset(),
+    extend: bool = False,
 ) -> list[dict[str, str]]:
     """Slot che il cittadino può accettare: futuri, liberi, entro la priorità, nella sua lingua,
     fuori dalla riserva urgente se la priorità non è U, nei giorni di lavoro del medico e (se
     date) con le sue preferenze. Ordinati dal più vicino."""
 
-    horizon = _horizon(now, priority)
+    horizon = _horizon(now, priority, extend)
     earliest = now + _LEAD
     known = _doctors(lines)
     chosen: list[tuple[datetime, dict[str, str]]] = []
@@ -1387,14 +1447,15 @@ async def _advance(
             skip=skip, skip_facilities=skip_fac, **prefs,  # type: ignore[arg-type]
         )
 
+    # Pagine da leggere: con la gara lunga (1200 minuti, ~64 giorni di catalogo) le prime pagine
+    # sono date passate, quindi salto direttamente a quelle da oggi in poi (_next_page).
+    limit = _horizon(now, priority, extend=True)
     for _round in range(_MAX_PAGE):
-        if _has_world(chat):
-            _, page, pages = _world_lines(chat)
-            if pick(chat, days=days, gender=gender) or page >= min(pages, _MAX_PAGE):
-                break
-            wanted = page + 1
-        else:
-            wanted = 1
+        if _has_world(chat) and pick(chat, days=days, gender=gender):
+            break
+        wanted = _next_page(chat, now + _LEAD, limit)
+        if wanted is None:
+            break
         ask = f"world procedure={procedure} page={wanted}"
         if not any(row.text.strip() == ask for row in _ours(chat, agent, LEDGER)):
             await _say(city, LEDGER, ask)
@@ -1402,9 +1463,9 @@ async def _advance(
             city,
             message.need_id,
             chat,
-            lambda rows, wanted=wanted: _has_world(rows) and _world_lines(rows)[1] >= wanted,
+            lambda rows, wanted=wanted: wanted in _page_spans(rows)[0],
         )
-        if not _has_world(chat) or _world_lines(chat)[1] < wanted:
+        if wanted not in _page_spans(chat)[0]:
             break
     if not _has_world(chat):
         return
@@ -1415,6 +1476,11 @@ async def _advance(
     relaxed: list[dict[str, str]] = []
     if not strict and (days or gender):
         relaxed = pick(chat)
+    if not strict and not relaxed and priority in {"B", "D"}:
+        # Ultima possibilità: la scadenza contata in giorni di agenda (niente sabato e domenica).
+        strict = pick(chat, days=days, gender=gender, extend=True)
+        if not strict and (days or gender):
+            relaxed = pick(chat, extend=True)
     if strict or relaxed:
         await _send_offers(
             city, chat, key, citizen, strict or relaxed,
@@ -1894,6 +1960,23 @@ async def _serve_partner(city: City, message: Message, chat: list[Message], key:
     )
     agenda = _ledger(chat, "agenda") or {}
     now = _when(agenda.get("agenda_now") or agenda.get("now") or "")
+    for _round in range(_MAX_PAGE):
+        if now is None or priority == "P":
+            break
+        lines, _, _ = _world_lines(chat)
+        if fitting(lines, now=now, priority=priority, lang=fields.get("lang", "it"), procedure=procedure):
+            break
+        wanted = _next_page(chat, now + _LEAD, _horizon(now, priority, extend=True))
+        if wanted is None:
+            break
+        ask = f"world procedure={procedure} page={wanted}"
+        if not any(row.text.strip() == ask for row in _ours(chat, agent, LEDGER)):
+            await _say(city, LEDGER, ask)
+        chat = await _until(
+            city, message.need_id, chat, lambda rows, wanted=wanted: wanted in _page_spans(rows)[0]
+        )
+        if wanted not in _page_spans(chat)[0]:
+            break
     lines, _, _ = _world_lines(chat)
     slots = (
         fitting(lines, now=now, priority=priority, lang=fields.get("lang", "it"), procedure=procedure)

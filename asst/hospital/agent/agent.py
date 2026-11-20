@@ -197,6 +197,84 @@ async def handle(role: str, city: City, message: Message, chat: list[Message]) -
 _ACK = "Ricevuto, grazie: blocco subito il posto sul Ledger e vi mando la conferma firmata appena è pronta."
 
 
+def _page_spans(chat: list[Message]) -> tuple[dict[int, tuple[datetime | None, datetime | None]], int]:
+    """Per ogni pagina del mondo letta: primo e ultimo orario. Più il numero di pagine."""
+
+    spans: dict[int, tuple[datetime | None, datetime | None]] = {}
+    total = 0
+    for row in chat:
+        if row.sender != LEDGER or first_word(row.text) not in {"slots", "world"}:
+            continue
+        head = row.text.splitlines()[0] if row.text else ""
+        left, _, right = fields_of(head).get("page", "1/1").partition("/")
+        page = int(left) if left.isdigit() else 1
+        total = max(total, int(right) if right.isdigit() else 1)
+        times = []
+        for line in row.text.splitlines():
+            fields = fields_of(line)
+            if "slot_id" in fields:
+                at = _when(fields.get("at") or fields.get("agenda_date", ""))
+                if at is not None:
+                    times.append(at)
+        spans[page] = (min(times), max(times)) if times else (None, None)
+    return spans, total
+
+
+def _all_slot_lines(chat: list[Message]) -> list[str]:
+    """Le righe di slot di tutte le pagine lette (senza doppioni)."""
+
+    seen: set[str] = set()
+    lines: list[str] = []
+    for row in chat:
+        if row.sender != LEDGER or first_word(row.text) not in {"slots", "world"}:
+            continue
+        for line in row.text.splitlines():
+            fields = fields_of(line)
+            slot = fields.get("slot_id")
+            if slot and slot not in seen:
+                seen.add(slot)
+                if "at" not in fields and "agenda_date" in fields:
+                    line += " at=" + fields["agenda_date"]
+                if "day" not in fields and "agenda_day" in fields:
+                    line += " day=" + fields["agenda_day"]
+                lines.append(line)
+    return lines
+
+
+def _searching(chat: list[Message], earliest: datetime) -> bool:
+    """True finché la ricerca binaria non ha trovato la PRIMA pagina con orari futuri."""
+
+    spans, _ = _page_spans(chat)
+    past = [p for p, (_, last) in spans.items() if last is not None and last < earliest]
+    future = sorted(p for p, (_, last) in spans.items() if last is not None and last >= earliest)
+    return bool(future) and future[0] > max(past, default=0) + 1
+
+
+def _next_page(chat: list[Message], earliest: datetime, limit: datetime | None) -> int | None:
+    """Ricerca binaria fino alla prima pagina con orari da ``earliest`` in poi, poi in ordine
+    finché supero ``limit``. Funziona se il Ledger elenca gli slot in ordine di data."""
+
+    spans, total = _page_spans(chat)
+    if not spans:
+        return 1
+    past = [p for p, (_, last) in spans.items() if last is not None and last < earliest]
+    future = sorted(p for p, (_, last) in spans.items() if last is not None and last >= earliest)
+    low = max(past, default=0)
+    if not future or future[0] > low + 1:
+        high = future[0] if future else total + 1
+        wanted = max((low + high) // 2, low + 1)
+        while wanted in spans and wanted < high:
+            wanted += 1
+        return wanted if wanted <= total and wanted not in spans else None
+    page = future[0]
+    while page in spans:
+        _, last = spans[page]
+        if limit is not None and last is not None and last >= limit:
+            return None
+        page += 1
+    return page if page <= total else None
+
+
 async def _serve_partner(city: City, message: Message, chat: list[Message], default: str) -> None:
     """Un CUP (di solito di un'altra ASST) chiede disponibilità. Rispondo con i miei slot liberi,
     al massimo tre, senza chiedere né dare dati personali. Il confirm poi arriva a me."""
@@ -221,13 +299,28 @@ async def _serve_partner(city: City, message: Message, chat: list[Message], defa
         lambda rows: _has_agenda(rows) and _latest_slots(rows) is not None,
     )
     now = _when((_ledger(chat, "agenda") or {}).get("agenda_now", ""))
-    world = _latest_slots(chat)
     slots: list[dict[str, str]] = []
-    if now is not None and world is not None and priority != "P":
+    # Gara lunga: le prime pagine sono date passate, salto alla prima con orari futuri.
+    for _round in range(16):
+        if now is None or priority == "P" or _latest_slots(chat) is None:
+            break
+        earliest = now + _LEAD
         slots = fitting(
-            [line for line in world.splitlines() if "slot_id=" in line],
-            now=now, priority=priority, lang=lang, procedure=procedure,
+            _all_slot_lines(chat), now=now, priority=priority, lang=lang, procedure=procedure,
         )[:3]
+        if slots and not _searching(chat, earliest):
+            break
+        limit = None if priority == "U" else now + timedelta(days=_DEADLINE_DAYS.get(priority or "", 14) + 2)
+        wanted = _next_page(chat, earliest, limit)
+        if wanted is None:
+            break
+        if not _asked(chat, agent, procedure, wanted):
+            await _say(city, LEDGER, f"world procedure={procedure} page={wanted}")
+        chat = await _until(
+            city, message.need_id, chat, lambda rows, wanted=wanted: wanted in _page_spans(rows)[0]
+        )
+        if wanted not in _page_spans(chat)[0]:
+            break
     if not slots:
         await _say(
             city, message.sender,
