@@ -436,7 +436,8 @@ async def _desk(city: City, message: Message, chat: list[Message]) -> None:
         # un agente: niente ricevute fantasma.
         agent_sender = sender.startswith("agent:")
         if "booking.receipt" in heads and agent_sender:
-            await _ack(city, message, key, "Grazie, ricevuto: giro subito la ricevuta al cittadino.")
+            if _confirmed_to(chat, city.agent_id, sender):
+                await _ack(city, message, key, "Grazie, ricevuto: giro subito la ricevuta al cittadino.")
             await _forward_receipt(city, message, chat, key)
         elif heads & {"cancel", "refused", "fault.cancel", "expired"}:
             if agent_sender:
@@ -460,6 +461,17 @@ async def _desk(city: City, message: Message, chat: list[Message]) -> None:
 
     # Il cittadino annulla o rinuncia: mai "Fatto" né "grazie per la scelta". Libero il posto
     # presso la struttura e, se la visita gli serve ancora, gli propongo un'alternativa.
+    if _cancel_intent(text) and _cancel_everything(text) and not fields_of(text).get("offer_id"):
+        offers_now = _our_offers(chat, city.agent_id, sender)
+        booked = any(
+            offer.get("slot_id") and _confirmed_slot(chat, city.agent_id, offer["slot_id"])
+            for offer in offers_now.values()
+        )
+        if booked:
+            await _locked(key, lambda: _on_citizen_cancel(city, message, chat, key))
+        else:
+            await _locked(key, lambda: _release(city, key, sender, _number(chat), tone))
+        return
     if _cancel_intent(text):
         offers_now = _our_offers(chat, city.agent_id, sender)
         booked = any(

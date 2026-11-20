@@ -158,8 +158,16 @@ async def main(need: Need, city: City) -> None:
     # Medico di base: prima emergenza e protocollo, poi il rifiuto clinico (dentro _gp).
     if clinical(text) and role != "gp":
         raise OutOfScope()
-    case = await city.history(need_id=message.need_id)
-    await handle(role, city, message, case)
+    # Un solo turno alla volta per need: due messaggi che arrivano insieme (o un messaggio e il
+    # suo reinvio) non producono due ricette. La storia si rilegge DENTRO il lucchetto, così il
+    # secondo turno vede la ricetta già emessa dal primo.
+    lock = _NEED_LOCKS.setdefault(message.need_id or message.msg_id, asyncio.Lock())
+    async with lock:
+        case = await city.history(need_id=message.need_id)
+        await handle(role, city, message, case)
+
+
+_NEED_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 def _asks_address(message: Message) -> bool:

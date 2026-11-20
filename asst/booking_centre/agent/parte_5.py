@@ -28,6 +28,10 @@ def _declined_after(chat: list[Message], agent: str, citizen: str, purpose: str)
             return False
         if _chosen_offer(row.text, offers):
             continue  # una scelta non è una risposta al consenso
+        if "need.request" in (line_heads(row.text) | words(row.text)) or _number_in(row.text):
+            continue  # una richiesta ripetuta non è una risposta al consenso
+        if _consent_question(row.text) or _affirmative(row.text):
+            return False  # una domanda o un sì a parole non sono un rifiuto
         return True
     return False
 
@@ -267,6 +271,8 @@ async def _forward_receipt(city: City, message: Message, chat: list[Message], ke
     citizen = _citizen(chat)
     if not booking_id or not ledger_ref or not citizen:
         return
+    if not _confirmed_to(chat, city.agent_id, message.sender):
+        return  # una ricevuta vale solo dalla struttura a cui abbiamo mandato il confirm
     if _we(chat, city.agent_id, f"booking_id={booking_id}", to=citizen, head="booking.receipt"):
         return
     tone = _tone(chat)
@@ -325,6 +331,8 @@ async def _facility_cancel(city: City, message: Message, chat: list[Message], ke
         offer_id = _confirmed_offer(chat, agent, citizen, message.sender).get("offer_id", offer_id)
     if offer_id not in offers:
         # Una partner senza posti: se non ho offerte in corso, propongo l'alternativa.
+        if not offers and await _partner_said_no(city, message, chat, key):
+            return
         if not offers and "cross" in _sent(key).flags:
             number = _number(chat)
             _, reply = _prescription_ok(chat, number) if number else ("", {})

@@ -272,7 +272,7 @@ def _lang(chat: list[Message]) -> str:
     # La lingua del MEDICO: una richiesta esplicita vince sulla lingua in cui il cittadino
     # scrive o che dichiara (che resta quella della conversazione, vedi _tone).
     for row in reversed(_from_citizen(chat)):
-        asked = _lang_request(row.text)
+        asked = _lang_request(row.text) or _lang_named(row.text)
         if asked:
             return asked
     for row in _from_citizen(chat):
@@ -724,6 +724,8 @@ def normalize_slot(raw: dict[str, str]) -> dict[str, str] | None:
         if key in slot:
             reserve = slot[key].lower()
             break
+    if not reserve and (slot.get("priority") or slot.get("slot_priority") or "").upper() == "U":
+        reserve = "u"  # slot riservato alle urgenze: non si offre a B, D e P
     slot["reserve"] = "true" if reserve in {"true", "yes", "si", "sì", "u", "urgent", "urgente", "1"} else ""
     return slot
 
@@ -741,6 +743,8 @@ def fitting(
     skip: set[str] | frozenset[str] = frozenset(),
     skip_facilities: set[str] | frozenset[str] = frozenset(),
     extend: bool = False,
+    partner: bool = False,
+    skip_doctors: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict[str, str]]:
     """Slot che il cittadino può accettare: futuri, liberi, entro la priorità, nella sua lingua,
     fuori dalla riserva urgente se la priorità non è U, nei giorni di lavoro del medico e (se
@@ -753,7 +757,7 @@ def fitting(
     seen: set[str] = set()
     for line in lines:
         slot = normalize_slot(fields_of(line))
-        if slot is None or slot["slot_id"] in skip or slot["slot_id"] in seen:
+        if slot is None or slot["slot_id"] in skip or slot["slot_id"] in seen or slot["doctor_id"] in skip_doctors:
             continue
         at = _when(slot["at"])
         assert at is not None
@@ -778,7 +782,9 @@ def fitting(
             continue
         if not 8 <= at.hour < 18:
             continue  # ambulatori aperti 08-18
-        spec = _spec(doctor, known)
+        # Medici di un'ASST partner: valgono solo i loro dati (doctor_lang, doctor_gender), mai
+        # la tabella dei nostri medici, che hanno codici simili ma lingue e giorni diversi.
+        spec = known.get(doctor) if partner else _spec(doctor, known)
         langs = frozenset(_lang_name(part) for part in _split(slot.get("languages", ""))) or (
             spec[0] if spec else frozenset()
         )

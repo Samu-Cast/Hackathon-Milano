@@ -182,6 +182,9 @@ async def _advance(
         slot for slot in sent.offers if not slot.startswith("wl-")
     }
     if offered and not (replacing or refresh):
+        if latest is not None and _repeat_request(chat, agent, latest):
+            await _resend_offers(city, chat, key, citizen, latest)
+            return
         if guard and latest is not None:
             await _say(city, citizen, guard)
         return  # le offerte sono già sul tavolo: il cittadino sta scegliendo
@@ -194,11 +197,14 @@ async def _advance(
     skip_fac = _unreachable(chat, agent)
     lang = _lang(chat)
 
+    bad_doctors = _rejected_doctors(chat, agent, citizen)
+
     def pick(rows: list[Message], **prefs: object) -> list[dict[str, str]]:
         lines, _, _ = _world_lines(rows)
         return fitting(
             lines, now=now, priority=priority, lang=lang, procedure=procedure,
-            skip=skip, skip_facilities=skip_fac, **prefs,  # type: ignore[arg-type]
+            skip=skip, skip_facilities=skip_fac, skip_doctors=bad_doctors,
+            **prefs,  # type: ignore[arg-type]
         )
 
     # Pagine da leggere: con la gara lunga (1200 minuti, ~64 giorni di catalogo) le prime pagine
@@ -254,12 +260,19 @@ async def _advance(
 
     # 6. Niente nella mia ASST: cerco nelle ASST partner, solo con i criteri.
     lines, _, _ = _world_lines(chat)
+    if _cross_started(chat, agent) and await _offer_partner_reserve(
+        city, chat, key, citizen, number, procedure, priority, tone, note,
+        replacing=replacing, exclude_offered=refresh, trigger=trigger,
+    ):
+        return  # riserve delle ASST partner ancora compatibili (livello 4)
+    if latest is not None and _cross_started(chat, agent) and await _consent_followup(city, chat, key, citizen, latest):
+        return  # risposta (o domanda) sul consenso cross_asst: rispondo e la ricerca resta aperta
     if _partner_search_stalled(chat, agent, citizen, latest, sent):
         # Il cittadino ha riscritto e le ASST partner non hanno ancora mandato posti: chiudo la
         # ricerca (i nostri posti li ho appena ricontrollati) e propongo l'alternativa.
         await _no_slot_fallback(city, chat, key, citizen, number, procedure, priority, tone, note=note)
         return
-    if not (declined and "cross" in sent.flags) and await _cross_asst(
+    if not ((declined or replacing) and ("cross" in sent.flags or _cross_started(chat, agent))) and await _cross_asst(
         city, chat, key, citizen, procedure, priority, _own_facilities(lines), tone, note
     ):
         return
@@ -277,6 +290,8 @@ def _partner_search_stalled(
     heads = line_heads(latest.text) | words(latest.text)
     if heads & {"consent", "data.response"} or fields_of(latest.text).get("consent_ref") or _CONSENT_BARE.search(latest.text):
         return False
+    if _consent_question(latest.text) or _affirmative(latest.text):
+        return False  # risponde (o chiede) del consenso: la ricerca presso le partner resta aperta
     asked = [i for i, row in enumerate(chat) if row.sender == agent and "need.request" in line_heads(row.text)]
     if not asked or not any(row.sender == citizen for row in chat[asked[0] + 1:]):
         return False
@@ -422,6 +437,7 @@ async def _send_offers(
     partner: bool = False,
     trigger: str = "",
     beyond: bool = False,
+    intro_text: str = "",
 ) -> None:
     sent = _sent(key)
     if replacing:
@@ -437,7 +453,7 @@ async def _send_offers(
         return
     label = _label(procedure, tone)
     kind = "offers_beyond" if beyond else "offers_replacing" if replacing else "offers_partner" if partner else "offers_relaxed" if relaxed else "offers_normal"
-    intro = tr(kind, tone, label=label)
+    intro = intro_text or tr(kind, tone, label=label)
     why = "" if beyond else _priority_text(priority, tone)
     if why:
         intro = why + " " + tr("prio_window", tone) + "\n" + intro
@@ -507,6 +523,9 @@ async def _beyond_or_release(
     cittadino le ha già rifiutate, rilascio la richiesta."""
 
     sent = _sent(key)
+    open_slots = _offered_slots(chat, city.agent_id, citizen) - _cancelled_slots(chat, city.agent_id, citizen) - _citizen_cancelled(key)
+    if open_slots:
+        return  # ci sono offerte ancora aperte: aspetto che il cittadino scelga o rifiuti
     agenda = _ledger(chat, "agenda") or {}
     now = _when(agenda.get("agenda_now") or agenda.get("now") or agenda.get("at") or "")
     if "beyond" not in sent.lines and now is not None and procedure:
@@ -526,15 +545,29 @@ async def _beyond_or_release(
                 break
         lines, _, _ = _world_lines(chat)
         skip = _cancelled_slots(chat, agent, citizen) | _offered_slots(chat, agent, citizen)
+        bad_doctors = _rejected_doctors(chat, agent, citizen)
         later_slots = fitting(
             lines, now=now, priority=None, lang=_lang(chat), procedure=procedure,
-            skip=skip, skip_facilities=_unreachable(chat, agent),
+            skip=skip, skip_facilities=_unreachable(chat, agent), skip_doctors=bad_doctors,
         )
-        if later_slots:
+        # Seconda alternativa: entro la scadenza, allentando la lingua del medico (se ne aveva
+        # chiesta una diversa dall'italiano). Le due vanno nello stesso messaggio.
+        doctor_lang = _lang(chat)
+        in_time = []
+        if doctor_lang not in ("", "it") and not _rejected_for(chat, agent, citizen, "lang"):
+            in_time = fitting(
+                lines, now=now, priority=priority, lang="it", procedure=procedure,
+                skip=skip | {slot["slot_id"] for slot in later_slots},
+                skip_facilities=_unreachable(chat, agent), skip_doctors=bad_doctors,
+            )
+        if later_slots or in_time:
             sent.lines.add("beyond")
+            picked = (later_slots[:2] + in_time[:1]) if (later_slots and in_time) else (later_slots or in_time)
+            intro = _relaxed_intro(tone, procedure, doctor_lang, bool(later_slots), bool(in_time))
             await _send_offers(
-                city, chat, key, citizen, later_slots, number=number, priority=priority,
+                city, chat, key, citizen, picked, number=number, priority=priority,
                 procedure=procedure, tone=tone, relaxed=True, replacing=False, note=note, beyond=True,
+                intro_text=intro,
             )
             return
     await _release(city, key, citizen, number, tone)
@@ -629,6 +662,9 @@ async def _cross_asst(
         ]
         if priority:
             parts.append(f"priority={priority}")
+        deadline = _request_deadline(chat, priority)
+        if deadline:
+            parts.append(f"deadline={deadline}")
         text = " ".join(parts) + (
             "\nBuongiorno, il Centro prenotazioni di un'ASST partner cerca disponibilità per "
             "questa prestazione. In questa fase non condividiamo dati del paziente: se avete "
@@ -641,7 +677,7 @@ async def _cross_asst(
     prose = tr("cross_search", tone, label=_label(procedure, tone))
     if note:
         prose = note + "\n" + prose
-    await _once(city, key, "cross_consent", citizen, "consent purpose=cross_asst\n" + prose)
+    await _once(city, key, "cross_consent", citizen, _consent_head("cross_asst", key) + "\n" + prose)
     return True
 
 
@@ -664,15 +700,22 @@ def _consent_ref(chat: list[Message], purpose: str, agent: str, citizen: str) ->
             ref = hit.group(1) if hit else None
         if not ref:
             continue
-        said = fields.get("purpose") or ("cross_asst" if "cross" in ref else last_asked)
+        is_choice = bool(fields.get("offer_id")) or "confirm" in (line_heads(row.text) | words(row.text))
+        said = fields.get("purpose") or (
+            "cross_asst" if "cross" in ref
+            else "booking" if ("booking" in ref or is_choice)
+            else last_asked
+        )
         if said == purpose:
             found = ref
-    return found
+    return found or _consent_by_words(chat, purpose, agent, citizen)
 
 
 async def _partner_offer(city: City, message: Message, chat: list[Message], key: str) -> None:
     """Offerte di una struttura partner: le verifico e le giro al cittadino."""
 
+    await _on_partner_offer(city, message, chat, key)  # livello 4: vedi parte_6.py
+    return
     citizen = _citizen(chat)
     if citizen is None:
         return
@@ -844,10 +887,15 @@ async def _on_confirm(
         receipt = _receipt_for(chat, agent, citizen)
         if receipt:
             await _say(city, citizen, receipt)
+            return
+        await _confirm_pending(city, message, chat, key, offer_id, offer, slot)
         return
 
     world, _, _ = _world_lines(chat)
-    cross = facility not in _own_facilities(world) and bool(world)
+    # Una struttura è nostra solo se compare nel nostro mondo o è uno dei nostri agenti in gara.
+    # (Prima: con il mondo vuoto ogni struttura risultava nostra e i dati uscivano senza il
+    # consenso cross_asst.)
+    cross = facility not in (_own_facilities(world) | set(_team_facilities().values()))
     booking_ref = fields_of(message.text).get("consent_ref") if not cross else None
     booking_ref = booking_ref or _consent_ref(chat, "booking", agent, citizen)
     cross_ref = _consent_ref(chat, "cross_asst", agent, citizen) if cross else None
@@ -855,12 +903,15 @@ async def _on_confirm(
     if cross and not cross_ref:
         # Regola P2 e privacy: nessun dato del cittadino esce dall'ASST prima del consenso.
         asked = _we(chat, agent, "purpose=cross_asst", to=citizen, head="consent")
-        declined = asked and _declined_after(chat, agent, citizen, "cross_asst")
+        asked_for_this = _we(chat, agent, f"offer_id={offer_id}", to=citizen, head="consent")
+        # Ha scelto proprio un'offerta di un'altra ASST: gli chiedo il consenso per QUESTA offerta,
+        # anche se prima sembrava averlo negato. Solo un no a questa domanda porta all'alternativa.
+        declined = asked_for_this and _declined_after(chat, agent, citizen, "cross_asst")
         if declined:
             await _locked_free_alternative(city, message, chat, key, facility)
             return
         prose = tr("cross_choice", tone)
-        await _say(city, citizen, f"consent purpose=cross_asst offer_id={offer_id}\n" + prose)
+        await _say(city, citizen, _consent_head("cross_asst", key, offer_id) + "\n" + prose)
         return
 
     # Sicurezza e fiducia: un consenso non si indovina mai. Se il cittadino non l'ha dato lo
@@ -872,7 +923,7 @@ async def _on_confirm(
     if not booking_ref and not cross_ref:
         if not _we(chat, agent, "purpose=booking", to=citizen, head="consent"):
             prose = tr("booking_consent", tone)
-            await _say(city, citizen, f"consent purpose=booking offer_id={offer_id}\n" + prose)
+            await _say(city, citizen, _consent_head("booking", key, offer_id) + "\n" + prose)
         elif _declined_after(chat, agent, citizen, "booking"):
             prose = tr("booking_declined", tone)
             await _once(city, key, "booking-declined", citizen, prose)
