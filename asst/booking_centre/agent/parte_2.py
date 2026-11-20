@@ -809,6 +809,9 @@ def _our_offers(chat: list[Message], agent: str, citizen: str) -> dict[str, dict
 def _chosen_offer(text: str, offers: dict[str, dict[str, str]]) -> str | None:
     """L'offerta che il cittadino ha nominato: come token, come slot, o scritta così com'è."""
 
+    # Un cittadino che annulla o rifiuta non sta scegliendo (anche se nomina l'offer_id).
+    if "cancel" in words(text) or first_word(text) == "cancel":
+        return None
     fields = fields_of(text)
     if fields.get("offer_id") in offers:
         return fields["offer_id"]
