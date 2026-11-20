@@ -65,44 +65,60 @@ async def _handle_turn(need: Need, city: City, message: Message) -> None:
         if city.address:
             await city.say(sender, f"address={city.address}")
         return
+    if sender.startswith("agent:"):
+        # Un CUP (di un'altra ASST) cerca posti o conferma uno slot che gli abbiamo offerto.
+        case = await city.history(need_id=message.need_id)
+        if first_word(message.text) == "need.request":
+            await _serve_partner(city, message, case)
+        elif "confirm" in words(message.text):
+            await _partner_confirm(city, message, case)
+        return
     if not citizen and sender != LEDGER:
         return
     case = await city.history(need_id=message.need_id)
     act = first_word(message.text)
     if citizen:
         interpreted = understood(message)
-        if getattr(need, "is_emergency", False) is True or interpreted.body.get("is_emergency") is True:
+        tone = _tone(case)
+        if (
+            getattr(need, "is_emergency", False) is True
+            or interpreted.body.get("is_emergency") is True
+            or _red_flag(message.text)
+        ):
             if not _we(case, city.agent_id, "reason=red_flag", to=sender, word="escalate.emergency"):
-                await city.say(sender, "escalate.emergency reason=red_flag — La tua segnalazione richiede assistenza urgente.")
-            return
-        if clinical(message.text or need.summary):
-            await _say(city, sender, "Per una valutazione clinica puoi rivolgerti a un professionista sanitario. Qui posso aiutarti con l’appuntamento.")
-            return
-        if act == "confirm" or message.type == "confirm":
-            fields = interpreted.body | fields_of(message.text)
-            offer_id = fields.get("offer_id")
-            consent = fields.get("consent_ref")
-            if not _valid_ref(offer_id) or not _valid_ref(consent):
-                return
-            offer = _our_offer(case, city.agent_id, offer_id)
-            if _citizen(case) != sender or not offer or _we(case, city.agent_id, f"offer_id={offer_id}", to=sender, word="cancel"):
-                return
-            slot = offer["slot_id"]
-            if not _we(case, city.agent_id, f"slot_id={slot}", to=LEDGER, word="hold"):
-                if not await _say(city, LEDGER, f"hold slot_id={slot} citizen={sender} consent_ref={consent}"):
-                    await _say(city, sender, "Non ho potuto confermare questo orario. La prenotazione non è stata completata.")
-                    return
-            await _finish_booking(city, message, case, slot, hold_self=True)
+                await _say(city, sender, _escalation_text(tone))
             return
         if act == "checkin" or message.type == "checkin":
             await _on_checkin(city, message, case, reports=False)
             return
+        fields = dict(interpreted.body) | fields_of(message.text)
+        offers = _our_offers(case, city.agent_id)
+        chosen = fields.get("offer_id") if fields.get("offer_id") in offers else None
+        consent = fields.get("consent_ref") or _bare_consent(message.text)
+        if not chosen and (
+            act == "consent" or consent or _awaiting_consent(case, city.agent_id, sender)
+        ):
+            # Risposta alla nostra richiesta di consenso (un sì con consent_ref, o un no a parole).
+            chosen = _pending_choice(case, city.agent_id, sender, offers)
+        if chosen or act == "confirm" or message.type == "confirm":
+            await _on_choice(city, message, case, chosen, consent, offers, tone)
+            return
+        # Una parola clinica non blocca la prenotazione: rispondo con garbo e prenoto.
+        note = ""
+        if clinical(message.text or need.summary):
+            note = (
+                "For clinical questions the right person is a healthcare professional; here I "
+                "take care of your appointment."
+                if tone == "en"
+                else "Per le domande cliniche la persona giusta è un professionista sanitario; "
+                "qui mi occupo del suo appuntamento."
+            )
         # The incoming need already identifies the consultorio journey. Its prose
         # may be a statement, so no question mark or booking keyword is required.
         if interpreted.type == "need.request" or not any(
             row.sender.startswith("citizen:") and row.msg_id != message.msg_id for row in case
         ):
-            await _advance(city, message, case, fixed="CONS-GIN", replacing=False)
+            await _advance(city, message, case, fixed="CONS-GIN", replacing=False, note=note)
         return
     if act == "fault.cancel" or message.type == "fault.cancel":
         await _on_refused(city, message, case, hold_self=True)
@@ -370,25 +386,28 @@ def _asked(chat: list[Message], agent: str, procedure: str, page: int) -> bool:
     return False
 
 
-def _offered(chat: list[Message], agent: str) -> set[str]:
-    found: set[str] = set()
+def _offer_lines(chat: list[Message], agent: str, to: str | None = None) -> list[dict[str, str]]:
+    """Ogni riga ``offer ...`` che abbiamo mandato (un messaggio può averne fino a tre)."""
+
+    found: list[dict[str, str]] = []
     for row in chat:
-        if row.sender != agent or "offer" not in words(row.text):
+        if row.sender != agent or (to is not None and row.recipient != to):
             continue
-        slot = fields_of(row.text).get("slot_id")
-        if slot:
-            found.add(slot)
+        for line in row.text.splitlines():
+            if first_word(line) == "offer":
+                found.append(fields_of(line))
     return found
+
+
+def _offered(chat: list[Message], agent: str) -> set[str]:
+    return {line["slot_id"] for line in _offer_lines(chat, agent) if line.get("slot_id")}
 
 
 def _withdrawn(chat: list[Message], agent: str) -> set[str]:
     """Slots we cancelled. The citizen drops the rest, so those are offered again."""
 
     by_offer: dict[str, str] = {}
-    for row in chat:
-        if row.sender != agent or "offer" not in words(row.text):
-            continue
-        fields = fields_of(row.text)
+    for fields in _offer_lines(chat, agent):
         offer_id = fields.get("offer_id")
         slot = fields.get("slot_id")
         if offer_id and slot:
@@ -457,11 +476,284 @@ def _offer_line(slot: dict[str, str], number: str | None, priority: str | None) 
 
 
 def _our_offer(chat: list[Message], agent: str, offer_id: str) -> dict[str, str]:
-    token = f"offer_id={offer_id}"
-    for row in chat:
-        if row.sender == agent and token in row.text.split() and "offer" in words(row.text):
-            return fields_of(row.text)
+    for fields in _offer_lines(chat, agent):
+        if fields.get("offer_id") == offer_id:
+            return fields
     return {}
+
+
+# --- squadra epica: tono, allarmi, scelta, consenso, ASST partner ------------------------------
+
+_DAY_IT = {"mon": "lunedì", "tue": "martedì", "wed": "mercoledì", "thu": "giovedì", "fri": "venerdì"}
+_DAY_EN = {"mon": "Monday", "tue": "Tuesday", "wed": "Wednesday", "thu": "Thursday", "fri": "Friday"}
+_MONTH_IT = ("gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto",
+             "settembre", "ottobre", "novembre", "dicembre")
+_DAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+# Segnali d'allarme: non è una diagnosi, è il motivo per fermarsi e mandare al 112.
+_RED_FLAGS = (
+    "emorragi", "perdo molto sangue", "perdendo molto sangue", "sanguino molto",
+    "sanguinamento abbondante", "sanguinamento forte", "dolore fortissimo", "dolore insopportabile",
+    "dolore al petto", "dolore toracico", "non riesco a respirare", "svenut", "perso i sensi",
+    "convulsion", "voglio farla finita", "farmi del male", "togliermi la vita", "suicid",
+    "heavy bleeding", "bleeding heavily", "severe pain", "unbearable pain", "chest pain",
+    "can't breathe", "cannot breathe", "fainted", "passed out", "seizure",
+)
+_CONSENT_BARE = re.compile(r"\b(cons-[A-Za-z0-9][A-Za-z0-9_-]{2,80})")
+
+
+def _tone(chat: list[Message]) -> str:
+    """Italiano per chi scrive in italiano, inglese per tutti gli altri."""
+
+    return "it" if _lang(chat).lower() in {"", "it", "ita"} else "en"
+
+
+def _red_flag(text: str) -> bool:
+    lowered = " ".join(text.lower().replace("’", "'").split())
+    return any(flag in lowered for flag in _RED_FLAGS)
+
+
+def _escalation_text(tone: str) -> str:
+    if tone == "en":
+        return (
+            "escalate.emergency reason=red_flag\n"
+            "What you describe needs to be looked at straight away, before any appointment. "
+            "Please call 112 now or go to the nearest emergency department. If someone is with "
+            "you, ask them to stay close. The emergency team is the right help right now."
+        )
+    return (
+        "escalate.emergency reason=red_flag\n"
+        "Quello che mi descrive va valutato subito, prima di qualsiasi appuntamento. Chiami ora "
+        "il 112 oppure si rechi al pronto soccorso più vicino. Se c'è qualcuno con lei, gli "
+        "chieda di restarle accanto. I soccorritori sono l'aiuto giusto in questo momento."
+    )
+
+
+def _when_text(value: str, tone: str) -> str:
+    at = _when(value)
+    if at is None:
+        return value
+    day = _DAY_KEYS[at.weekday()]
+    if tone == "en":
+        return f"{_DAY_EN.get(day, day)} {at.day} {at.strftime('%B')} at {at:%H:%M}"
+    return f"{_DAY_IT.get(day, day)} {at.day} {_MONTH_IT[at.month - 1]} alle ore {at:%H:%M}"
+
+
+def _bare_consent(text: str) -> str | None:
+    hit = _CONSENT_BARE.search(text)
+    return hit.group(1) if hit else None
+
+
+def _our_offers(chat: list[Message], agent: str) -> dict[str, dict[str, str]]:
+    citizen = _citizen(chat)
+    return {
+        line["offer_id"]: line
+        for line in _offer_lines(chat, agent, citizen)
+        if line.get("offer_id")
+    }
+
+
+def _pending_choice(
+    chat: list[Message], agent: str, citizen: str, offers: dict[str, dict[str, str]]
+) -> str | None:
+    """L'offerta per cui abbiamo chiesto il consenso, o l'ultima nominata dal cittadino."""
+
+    chosen: str | None = None
+    for row in chat:
+        if row.sender == agent and row.recipient == citizen and first_word(row.text) == "consent":
+            offer_id = fields_of(row.text).get("offer_id")
+            if offer_id in offers:
+                chosen = offer_id
+        elif row.sender == citizen:
+            offer_id = fields_of(row.text).get("offer_id")
+            if offer_id in offers:
+                chosen = offer_id
+    return chosen
+
+
+def _awaiting_consent(chat: list[Message], agent: str, citizen: str) -> bool:
+    """Abbiamo chiesto il consenso e non abbiamo ancora mandato l'hold."""
+
+    asked = None
+    for index, row in enumerate(chat):
+        if row.sender == agent and row.recipient == citizen and first_word(row.text) == "consent":
+            asked = index
+    if asked is None:
+        return False
+    return not any(
+        row.sender == agent and row.recipient == LEDGER and first_word(row.text) == "hold"
+        for row in chat[asked:]
+    )
+
+
+def _requester(chat: list[Message], agent: str, slot: str) -> str:
+    """Il CUP (agente) che ci ha chiesto di prenotare questo slot, se c'è."""
+
+    token = f"slot_id={slot}"
+    for row in chat:
+        if (
+            row.sender.startswith("agent:")
+            and row.sender != agent
+            and "confirm" in words(row.text)
+            and token in row.text.split()
+        ):
+            return row.sender
+    return ""
+
+
+async def _on_choice(
+    city: City,
+    message: Message,
+    case: list[Message],
+    chosen: str | None,
+    consent: str | None,
+    offers: dict[str, dict[str, str]],
+    tone: str,
+) -> None:
+    agent = city.agent_id
+    citizen = message.sender
+    if _citizen(case) != citizen:
+        return
+    if not chosen:
+        if offers:
+            listed = [
+                f"- {_when_text(offer.get('agenda_date', ''), tone)}: offer_id={offer_id}"
+                for offer_id, offer in offers.items()
+                if offer.get("slot_id")
+            ]
+            intro = (
+                "Thank you! To book the right time I need the offer_id of the option you prefer:"
+                if tone == "en"
+                else "Grazie! Per prenotare proprio l'orario giusto mi serve l'offer_id "
+                "dell'opzione che preferisce:"
+            )
+            await _say(city, citizen, "\n".join([intro, *listed]))
+        return
+    offer = offers[chosen]
+    if offer.get("waiting_list", "").lower() == "true":
+        done = (
+            "Done: you are on the waiting list of the family counselling centre. You do not "
+            "need a prescription; we will propose a time as soon as one becomes free."
+            if tone == "en"
+            else "Fatto: è in lista d'attesa al consultorio. Non serve la ricetta; le proporremo "
+            "un orario appena se ne libera uno."
+        )
+        if not _exact(case, agent, done):
+            await _say(city, citizen, done)
+        return
+    if _we(case, agent, f"offer_id={chosen}", to=citizen, word="cancel"):
+        return
+    if not consent:
+        if not _we(case, agent, f"offer_id={chosen}", to=citizen, word="consent"):
+            prose = (
+                "Thank you for your choice! To book it I need your consent to use your booking "
+                "data (name and appointment) at the centre. No prescription is needed."
+                if tone == "en"
+                else "Grazie per la scelta! Per prenotarla mi serve il suo consenso a usare i dati "
+                "della prenotazione (nominativo e appuntamento) al consultorio. Non serve la ricetta."
+            )
+            await _say(city, citizen, f"consent purpose=booking offer_id={chosen}\n" + prose)
+        else:
+            prose = (
+                "No problem: without your consent I will not book anything. If you change your "
+                "mind, just write to me and we will pick up from here."
+                if tone == "en"
+                else "Nessun problema: senza il suo consenso non prenoto nulla. Se cambia idea mi "
+                "scriva pure, e ripartiamo da qui."
+            )
+            if not _exact(case, agent, prose):
+                await _say(city, citizen, prose)
+        return
+    if not _valid_ref(consent):
+        return
+    slot = offer["slot_id"]
+    if not _we(case, agent, f"slot_id={slot}", to=LEDGER, word="hold"):
+        if not await _say(city, LEDGER, f"hold slot_id={slot} citizen={citizen} consent_ref={consent}"):
+            await _say(
+                city, citizen,
+                f"cancel offer_id={chosen} reason=hold_refused\n"
+                + (
+                    "I am sorry, I could not reserve this time. I am looking for another one."
+                    if tone == "en"
+                    else "Mi dispiace, non sono riuscita a bloccare questo orario. Cerco subito "
+                    "un'alternativa."
+                ),
+            )
+            return
+    await _finish_booking(city, message, case, slot, hold_self=True)
+
+
+async def _serve_partner(city: City, message: Message, case: list[Message]) -> None:
+    """Il CUP di un'altra ASST cerca posti: offro i miei slot liberi (solo criteri)."""
+
+    agent = city.agent_id
+    fields = fields_of(message.text)
+    procedure = fields.get("procedure") or "CONS-GIN"
+    request_id = fields.get("request_id") or message.need_id or message.msg_id
+    tag = f"request_id={request_id}"
+    if _we(case, agent, tag, to=message.sender, word="offer") or _we(
+        case, agent, tag, to=message.sender, word="cancel"
+    ):
+        return
+    if not _has_agenda(case) and not _exact(case, agent, "agenda"):
+        await _say(city, LEDGER, "agenda")
+    if not _asked(case, agent, procedure, 1):
+        await _say(city, LEDGER, f"world procedure={procedure} page=1")
+    case = await _until(
+        city, message.need_id, case,
+        lambda rows: _has_agenda(rows) and _latest_slots(rows) is not None,
+    )
+    now = _when((_ledger(case, "agenda") or {}).get("agenda_now", ""))
+    world = _latest_slots(case)
+    slots: list[dict[str, str]] = []
+    if now is not None and world is not None:
+        slots = fitting(
+            [line for line in world.splitlines() if "slot_id=" in line],
+            now=now, priority=None, lang=(fields.get("lang") or "it").lower(),
+            facility=agent, procedure=procedure,
+        )[:3]
+    if not slots:
+        await _say(
+            city, message.sender,
+            f"cancel {tag} procedure={procedure} reason=no_availability "
+            "Al momento il consultorio non ha posti liberi per questa prestazione. Grazie!",
+        )
+        return
+    lines = [
+        _offer_line(slot, None, None).replace(
+            f"offer_id=of-{slot['slot_id']}", f"offer_id=px-{slot['slot_id']}"
+        ) + f" {tag}"
+        for slot in slots
+    ]
+    lines.append(
+        "Ecco i posti liberi del consultorio (accesso diretto, senza ricetta; nessun dato del "
+        "paziente richiesto finora). Per prenotare mandateci confirm con slot_id, citizen e "
+        "consent_ref."
+    )
+    await _say(city, message.sender, "\n".join(lines))
+
+
+async def _partner_confirm(city: City, message: Message, case: list[Message]) -> None:
+    """Il CUP di un'altra ASST conferma uno slot: hold e commit, la ricevuta torna a lui."""
+
+    agent = city.agent_id
+    fields = fields_of(message.text)
+    slot = fields.get("slot_id", "")
+    consent = fields.get("consent_ref", "")
+    citizen = fields.get("citizen", "")
+    if not slot or not _valid_ref(consent):
+        return
+    ack = "Ricevuto, grazie: blocco subito il posto sul Ledger e vi mando la conferma firmata."
+    if not _exact(case, agent, ack):
+        await _say(city, message.sender, ack)
+    if not _we(case, agent, f"slot_id={slot}", to=LEDGER, word="hold"):
+        parts = ["hold", f"slot_id={slot}"]
+        if citizen.startswith("citizen:"):
+            parts.append(f"citizen={citizen}")
+        parts.append(f"consent_ref={consent}")
+        if not await _say(city, LEDGER, " ".join(parts)):
+            return
+    await _finish_booking(city, message, case, slot, hold_self=True)
 
 
 class _Gate:
@@ -513,9 +805,10 @@ async def _advance(
     *,
     fixed: str | None,
     replacing: bool,
+    note: str = "",
 ) -> None:
     key = message.need_id or message.msg_id
-    await _advance_alone(city, message, chat, key, fixed=fixed, replacing=replacing)
+    await _advance_alone(city, message, chat, key, fixed=fixed, replacing=replacing, note=note)
 
 
 async def _advance_alone(
@@ -526,11 +819,13 @@ async def _advance_alone(
     *,
     fixed: str | None,
     replacing: bool,
+    note: str = "",
 ) -> None:
     agent = city.agent_id
     citizen = _citizen(chat)
-    if citizen is None:
-        return
+    if citizen is None or not any(row.sender == citizen for row in chat):
+        return  # offro solo a un cittadino che ci ha scritto (non a quello di un'ASST partner)
+    tone = _tone(chat)
     procedure = "CONS-GIN"
     if not replacing and (_offered(chat, agent) or _sent(key).offers):
         return
@@ -563,42 +858,105 @@ async def _advance_alone(
         taken = _withdrawn(chat, agent) | sent.again
     else:
         taken = _offered(chat, agent) | sent.offers
-    chosen = [
-        slot
-        for slot in fitting(
-            [line for line in world.splitlines() if "slot_id=" in line],
-            now=now,
-            priority=None,
-            lang=_lang(chat),
-            gender=_gender(chat),
-            facility=agent,
-            procedure=procedure,
-            days=_preferred_days(chat),
-        )
-        if slot.get("slot_id") not in taken
-    ]
-    if chosen:
-        slot = chosen[0]
-        text = _offer_line(slot, None, None)
-        appointment = _when(slot["at"])
-        if appointment is not None:
-            text += (
-                f" — Posso proporti una visita al consultorio il {appointment:%d/%m alle %H:%M} "
-                "nell’agenda della città. Per accedere non serve una ricetta. "
-                "Conferma se questo orario ti va bene."
+    lines = [line for line in world.splitlines() if "slot_id=" in line]
+
+    def fit(**prefs: object) -> list[dict[str, str]]:
+        return [
+            slot
+            for slot in fitting(
+                lines, now=now, priority=None, lang=_lang(chat), facility=agent,
+                procedure=procedure, **prefs,  # type: ignore[arg-type]
             )
+            if slot.get("slot_id") not in taken
+        ]
+
+    days = _preferred_days(chat)
+    gender = _gender(chat)
+    chosen = fit(gender=gender, days=days)
+    relaxed = False
+    if not chosen and (days or gender):
+        chosen = fit()
+        relaxed = bool(chosen)
+    if chosen:
+        picked = chosen[:3]
+        text = _offers_text(picked, tone=tone, relaxed=relaxed, replacing=replacing, note=note)
         if await _say(city, citizen, text):
-            sent.offers.add(slot["slot_id"])
+            sent.offers.update(slot["slot_id"] for slot in picked)
             if replacing:
-                sent.again.add(slot["slot_id"])
+                sent.again.update(slot["slot_id"] for slot in picked)
         return
     if taken and not replacing:
         return
     page, pages = _page(world)
     if page < pages and page < _MAX_PAGE and not _asked(chat, agent, procedure, page + 1):
         await _say(city, LEDGER, f"world procedure={procedure} page={page + 1}")
-    elif not _exact(chat, agent, "Al momento non ho trovato un appuntamento compatibile al consultorio."):
-        await _say(city, citizen, "Al momento non ho trovato un appuntamento compatibile al consultorio.")
+        return
+    # Nessun orario libero: lo dico chiaramente e propongo la lista d'attesa (alternativa).
+    offer_id = f"wl-{key}"
+    if offer_id in sent.offers or _we(chat, agent, f"offer_id={offer_id}", to=citizen, word="offer"):
+        return
+    if tone == "en":
+        prose = (
+            "I looked carefully, but right now the family counselling centre has no free time "
+            "that suits you. The alternative I can offer is the waiting list: no prescription is "
+            "needed, and we will propose a time as soon as one becomes free. If you agree, reply "
+            "with the offer_id below."
+        )
+    else:
+        prose = (
+            "Ho cercato con attenzione, ma al momento il consultorio non ha orari liberi adatti a "
+            "lei. L'alternativa che posso proporle è la lista d'attesa: non serve la ricetta e le "
+            "proporremo un orario appena se ne libera uno. Se è d'accordo mi risponda con "
+            "l'offer_id qui sotto."
+        )
+    if note:
+        prose = note + "\n" + prose
+    if await _say(
+        city, citizen,
+        prose + f"\noffer offer_id={offer_id} waiting_list=true procedure={procedure}",
+    ):
+        sent.offers.add(offer_id)
+
+
+def _offers_text(
+    slots: list[dict[str, str]], *, tone: str, relaxed: bool, replacing: bool, note: str
+) -> str:
+    if tone == "en":
+        if replacing:
+            intro = "I have already found new times at the family counselling centre for you"
+        elif relaxed:
+            intro = (
+                "With the preferences you gave me I found no free time. To be transparent, here "
+                "are the closest times without those preferences"
+            )
+        else:
+            intro = "Here are the free times at the family counselling centre, from the earliest"
+        intro += " (direct access: no prescription is needed):"
+        outro = (
+            "To choose, reply with the offer_id of the option you prefer. If none of them works "
+            "for you, just tell me."
+        )
+    else:
+        if replacing:
+            intro = "Ho già trovato per lei nuovi orari al consultorio"
+        elif relaxed:
+            intro = (
+                "Con le preferenze che mi ha indicato non ho trovato orari liberi. Per trasparenza "
+                "le propongo i più vicini, senza quelle preferenze"
+            )
+        else:
+            intro = "Ecco gli orari liberi al consultorio, dal più vicino"
+        intro += " (accesso diretto: non serve la ricetta):"
+        outro = (
+            "Per scegliere mi risponda con l'offer_id dell'opzione che preferisce. Se nessuna le "
+            "va bene, me lo dica pure."
+        )
+    out = [note, intro] if note else [intro]
+    for index, slot in enumerate(slots, start=1):
+        out.append(("Option" if tone == "en" else "Opzione") + f" {index}: {_when_text(slot['at'], tone)}")
+        out.append(_offer_line(slot, None, None))
+    out.append(outro)
+    return "\n".join(out)[:2000]
 
 
 async def _facility(
@@ -720,15 +1078,55 @@ async def _on_committed(city: City, message: Message, chat: list[Message]) -> No
     ledger_ref = fields.get("ledger_ref", "")
     if not booking_id or not ledger_ref:
         return
-    slot = fields.get("slot_id") or _hold_slot(chat, city.agent_id, fields.get("hold_id", ""))
-    sender, _, _ = _booking_of(chat, city.agent_id, slot) if slot else ("", "", None)
-    target = sender
-    if not target or target != _citizen(chat):
+    agent = city.agent_id
+    # Il Ledger usa l'hold_id come booking_id e non ripete lo slot: lo ritrovo da lì.
+    slot = (
+        fields.get("slot_id")
+        or _hold_slot(chat, agent, fields.get("hold_id", ""))
+        or _hold_slot(chat, agent, booking_id)
+    )
+    sender, _, _ = _booking_of(chat, agent, slot) if slot else ("", "", None)
+    requester = _requester(chat, agent, slot) if slot else ""
+    target = requester or sender
+    if not target or (not requester and target != _citizen(chat)):
         return
     token = f"booking_id={booking_id}"
-    if _we(chat, city.agent_id, token, to=target, word="booking.receipt"):
+    if _we(chat, agent, token, to=target, word="booking.receipt"):
         return
-    await _say(city, target, f"booking.receipt booking_id={booking_id} ledger_ref={ledger_ref} — Il tuo appuntamento al consultorio è confermato. Conserva questa ricevuta.")
+    head = f"booking.receipt booking_id={booking_id} ledger_ref={ledger_ref}"
+    if requester:
+        # Prenotazione chiesta dal CUP di un'altra ASST: la ricevuta torna a lui.
+        await _say(city, target, f"{head} slot_id={slot} Prenotazione registrata e firmata sul Ledger, grazie.")
+        return
+    tone = _tone(chat)
+    at = next((line.get("agenda_date", "") for line in _offer_lines(chat, agent, target)
+               if line.get("slot_id") == slot), "")
+    when = _when_text(at, tone) if at else ""
+    moment = _when(at) if at else None
+    window = ("08:00–13:00" if moment.hour < 13 else "13:00–18:00") if moment else ""
+    if tone == "en":
+        lines = ["Your appointment at the family counselling centre is booked and signed. Here is your receipt:", head]
+        if when:
+            lines.append(f"When: {when}.")
+        lines += [
+            "What to do now:",
+            "1. Keep booking_id and ledger_ref: they are your proof of booking.",
+            "2. On the day, check in at the centre" + (f" during the {window} slot" if window else "")
+            + ", giving booking_id and ledger_ref.",
+            "3. No prescription is needed; bring an identity document.",
+        ]
+    else:
+        lines = ["Il suo appuntamento al consultorio è prenotato e registrato con firma. Ecco la ricevuta:", head]
+        if when:
+            lines.append(f"Quando: {when}.")
+        lines += [
+            "Cosa fare adesso:",
+            "1. Conservi booking_id e ledger_ref: sono la prova della prenotazione.",
+            "2. Il giorno dell'appuntamento faccia il check-in al consultorio"
+            + (f" nella fascia {window}" if window else "") + ", indicando booking_id e ledger_ref.",
+            "3. Non serve la ricetta; porti con sé un documento d'identità.",
+        ]
+    await _say(city, target, "\n".join(lines))
 
 
 async def _on_refused(
@@ -749,16 +1147,31 @@ async def _on_refused(
     if not slot:
         return
     target, _, _ = _booking_of(chat, agent, slot)
+    requester = _requester(chat, agent, slot)
     offer_id = ""
-    for row in chat:
-        if row.sender == agent and first_word(row.text) == "offer" and f"slot_id={slot}" in row.text.split():
-            offer_id = fields_of(row.text).get("offer_id", offer_id)
+    for line in _offer_lines(chat, agent):
+        if line.get("slot_id") == slot:
+            offer_id = line.get("offer_id", offer_id)
+    code = re.search(r"\b([A-Z][A-Z_]{3,})\b", message.text)
+    reason = code.group(1) if code else "facility_cancelled"
+    if requester:
+        # Prenotazione di un'ASST partner: avviso il loro CUP, non scrivo al loro cittadino.
+        if not _we(chat, agent, f"slot_id={slot}", to=requester, word="cancel"):
+            await _say(city, requester, f"cancel offer_id={offer_id or 'px-' + slot} slot_id={slot} reason={reason} Ci scusiamo, questo posto non è più disponibile.")
+        return
     if (
         target
         and offer_id
         and not _we(chat, agent, f"offer_id={offer_id}", to=target, word="cancel")
     ):
-        await _say(city, target, f"cancel offer_id={offer_id} reason=facility_cancelled — L’orario scelto non è più disponibile. Verifico se c’è un’alternativa.")
+        prose = (
+            "I am sorry: the time you chose is no longer available. It is not your fault: I am "
+            "already looking for an alternative."
+            if _tone(chat) == "en"
+            else "Mi dispiace: l'orario scelto non è più disponibile. Non dipende da lei: sto già "
+            "cercando un'alternativa."
+        )
+        await _say(city, target, f"cancel offer_id={offer_id} reason={reason}\n{prose}")
         fresh = await city.history(need_id=message.need_id)
         await _advance(city, message, fresh, fixed="CONS-GIN", replacing=True)
 
@@ -766,9 +1179,9 @@ async def _on_refused(
 async def _on_checkin(city: City, message: Message, chat: list[Message], *, reports: bool) -> None:
     booking_id = fields_of(message.text).get("booking_id") or understood(message).body.get("booking_id", "")
     citizen = message.sender if message.sender.startswith("citizen:") else _citizen(chat)
-    if not _valid_ref(booking_id) or not citizen or not _we(
-        chat, city.agent_id, f"booking_id={booking_id}", to=citizen, word="booking.receipt"
-    ):
+    # Non pretendo di aver mandato io la ricevuta: per una prenotazione fatta da un'ASST partner
+    # la ricevuta l'ha girata il loro CUP. La validità la controlla il Ledger sul check-in.
+    if not _valid_ref(booking_id) or not citizen:
         return
     token = f"booking_id={booking_id}"
     if not _we(chat, city.agent_id, token, to=LEDGER, word="checkin"):
@@ -792,4 +1205,9 @@ async def _on_checked_in(
         return
     token = f"booking_id={booking_id}"
     if citizen and not _we(chat, city.agent_id, token, to=citizen, word="checkin"):
-        await _say(city, citizen, f"checkin booking_id={booking_id} — Il tuo arrivo al consultorio è stato registrato.")
+        prose = (
+            "Your arrival at the centre has been registered, thank you. Please wait to be called."
+            if _tone(chat) == "en"
+            else "Il suo arrivo al consultorio è stato registrato, grazie. Attenda pure la chiamata."
+        )
+        await _say(city, citizen, f"checkin booking_id={booking_id}\n{prose}")
