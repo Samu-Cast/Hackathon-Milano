@@ -1,0 +1,14 @@
+agent_id: agent:bdmy1m646zm8
+team: team:epica
+name: gp
+version: 1.0.0
+cap_versions:
+  - "1.0"
+profiles:
+  - mhm/1.0
+role: gp
+capabilities:
+  - gp
+no_clinical_advice: true
+endpoints:
+  mailbox: agent:bdmy1m646zm8

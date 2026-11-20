@@ -1,0 +1,14 @@
+agent_id: agent:qak7dsxef0g6
+team: team:epica
+name: family_counseling
+version: 1.0.0
+cap_versions:
+  - "1.0"
+profiles:
+  - mhm/1.0
+role: facility
+capabilities:
+  - family_counseling.gynecology
+no_clinical_advice: true
+endpoints:
+  mailbox: agent:qak7dsxef0g6
