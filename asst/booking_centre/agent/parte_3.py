@@ -81,6 +81,10 @@ async def _desk(city: City, message: Message, chat: list[Message]) -> None:
         return
 
     offers = _our_offers(chat, city.agent_id, sender)
+    if offers and "cancel" in heads:
+        # Il cittadino rifiuta un'offerta (cancel offer_id=... reason=...): non è una scelta.
+        await _locked(key, lambda: _citizen_declined(city, message, key))
+        return
     chosen = _chosen_offer(text, offers) if offers else None
     fields = fields_of(text)
     is_consent = "consent" in heads or bool(fields.get("consent_ref") or _CONSENT_BARE.search(text))
@@ -192,8 +196,10 @@ async def _advance(
     *,
     replacing: bool,
     refresh: bool = False,
+    declined: bool = False,
 ) -> None:
-    """Porta avanti il caso dal punto in cui è. ``replacing``: una struttura ha annullato e il
+    """Porta avanti il caso dal punto in cui è. ``declined``: il cittadino ha rifiutato tutte
+    le offerte; se non ci sono altre date si passa alle ASST partner e poi alla lista d'attesa. ``replacing``: una struttura ha annullato e il
     cittadino ha perso le offerte, quindi riparto. ``refresh``: il cittadino chiede altre date
     o ha dato preferenze nuove dopo aver visto le offerte."""
 
@@ -394,11 +400,8 @@ async def _advance(
     relaxed: list[dict[str, str]] = []
     if not strict and (days or gender):
         relaxed = pick(chat)
-    if not strict and not relaxed and priority in {"B", "D"}:
-        # Ultima possibilità: la scadenza contata in giorni di agenda (niente sabato e domenica).
-        strict = pick(chat, days=days, gender=gender, extend=True)
-        if not strict and (days or gender):
-            relaxed = pick(chat, extend=True)
+    # (Niente estensione della scadenza ai giorni di agenda: la città conta i giorni normali e
+    # rifiuta uno slot oltre la scadenza con reason=deadline.)
     if strict or relaxed:
         await _send_offers(
             city, chat, key, citizen, strict or relaxed,
@@ -407,7 +410,7 @@ async def _advance(
         )
         return
 
-    if refresh and offered:
+    if refresh and offered and not declined:
         # Nessuna data in più: lo dico con chiarezza e lascio valide quelle già proposte.
         prose = tr("nomore", tone)
         await _once(city, key, f"nomore:{trigger}", citizen, (note + "\n" + prose).strip())
@@ -415,13 +418,45 @@ async def _advance(
 
     # 6. Niente nella mia ASST: cerco nelle ASST partner, solo con i criteri.
     lines, _, _ = _world_lines(chat)
-    if await _cross_asst(
+    if not (declined and "cross" in sent.flags) and await _cross_asst(
         city, chat, key, citizen, procedure, priority, _own_facilities(lines), tone, note
     ):
         return
     await _waiting_list(
         city, chat, key, citizen, number, procedure, priority, tone, reason="empty", note=note
     )
+
+
+async def _citizen_declined(city: City, message: Message, key: str) -> None:
+    """Il cittadino ha rifiutato un'offerta. Se ne restano altre aspetto (spesso i rifiuti
+    arrivano uno per offerta, insieme). Quando le ha rifiutate tutte cerco altre date entro la
+    scadenza; se non ci sono provo le ASST partner e poi propongo la lista d'attesa."""
+
+    try:
+        chat = await city.history(need_id=message.need_id)
+    except CapError:
+        chat = []
+    if all(row.msg_id != message.msg_id for row in chat):
+        chat = [*chat, message]
+    agent = city.agent_id
+    citizen = message.sender
+    offers = _our_offers(chat, agent, citizen)
+    gone = _cancelled_slots(chat, agent, citizen)
+    still_open = [
+        oid for oid, offer in offers.items()
+        if not offer.get("waiting_list") and offer.get("slot_id") not in gone
+    ]
+    if still_open:
+        return
+    if any(offer.get("waiting_list") for offer in offers.values()) and not any(
+        offer.get("slot_id") and offer["slot_id"] not in gone for offer in offers.values()
+    ) and fields_of(message.text).get("offer_id", "").startswith("wl-"):
+        await _release(city, key, citizen, _number(chat), _tone(chat))
+        return
+    if _sent(key).lines & {f"declined-all:{len(offers)}"}:
+        return
+    _sent(key).lines.add(f"declined-all:{len(offers)}")
+    await _advance(city, message, chat, key, replacing=False, refresh=True, declined=True)
 
 
 def _count_ledger(chat: list[Message], head: str) -> int:
@@ -444,7 +479,8 @@ def _cancelled_slots(chat: list[Message], agent: str, citizen: str) -> set[str]:
     offers = _our_offers(chat, agent, citizen)
     gone: set[str] = set()
     for row in chat:
-        if "cancel" not in line_heads(row.text) and "refused" not in line_heads(row.text):
+        heads = line_heads(row.text) | (words(row.text) if row.sender == citizen else set())
+        if "cancel" not in heads and "refused" not in heads:
             continue
         fields = fields_of(row.text)
         offer = offers.get(fields.get("offer_id", ""))
@@ -521,6 +557,7 @@ async def _send_offers(
     note: str,
     partner: bool = False,
     trigger: str = "",
+    beyond: bool = False,
 ) -> None:
     sent = _sent(key)
     if replacing:
@@ -535,9 +572,9 @@ async def _send_offers(
     if not picked:
         return
     label = _label(procedure, tone)
-    kind = "offers_replacing" if replacing else "offers_partner" if partner else "offers_relaxed" if relaxed else "offers_normal"
+    kind = "offers_beyond" if beyond else "offers_replacing" if replacing else "offers_partner" if partner else "offers_relaxed" if relaxed else "offers_normal"
     intro = tr(kind, tone, label=label)
-    why = _priority_text(priority, tone)
+    why = "" if beyond else _priority_text(priority, tone)
     if why:
         intro = why + " " + tr("prio_window", tone) + "\n" + intro
     if note:
@@ -565,6 +602,11 @@ async def _waiting_list(
     reason: str,
     note: str,
 ) -> None:
+    if reason != "P" and (priority or "").upper() != "P":
+        # Regola della squadra: lista d'attesa solo per la priorità P. Per B, D e U propongo
+        # l'alternativa rilassata (date subito dopo la scadenza); se non c'è, rilascio.
+        await _beyond_or_release(city, chat, key, citizen, number, procedure, priority, tone, note)
+        return
     offer_id = f"wl-{key}"
     sent = _sent(key)
     if offer_id in sent.offers or _we(chat, city.agent_id, f"offer_id={offer_id}", to=citizen, head="offer"):
@@ -583,6 +625,62 @@ async def _waiting_list(
         prose = note + "\n" + prose
     if await _say(city, citizen, prose + "\n" + " ".join(parts)):
         sent.offers.add(offer_id)
+
+
+async def _beyond_or_release(
+    city: City,
+    chat: list[Message],
+    key: str,
+    citizen: str,
+    number: str | None,
+    procedure: str | None,
+    priority: str | None,
+    tone: str,
+    note: str,
+) -> None:
+    """Nessun posto entro la scadenza (né da noi né dalle partner): una sola volta propongo le
+    date più vicine dopo la scadenza, dette in modo trasparente. Se non ce ne sono, o se il
+    cittadino le ha già rifiutate, rilascio la richiesta."""
+
+    sent = _sent(key)
+    agenda = _ledger(chat, "agenda") or {}
+    now = _when(agenda.get("agenda_now") or agenda.get("now") or agenda.get("at") or "")
+    if "beyond" not in sent.lines and now is not None and procedure:
+        need_id = next((row.need_id for row in reversed(chat) if row.need_id), None)
+        agent = city.agent_id
+        for _round in range(4):  # qualche pagina in più: le date oltre la scadenza stanno dopo
+            spans, total = _page_spans(chat)
+            unseen = [page for page in range(1, total + 1) if page not in spans]
+            if not unseen or len(spans) >= total:
+                break
+            later = [page for page in unseen if page > max(spans, default=0)] or unseen
+            ask = f"world procedure={procedure} page={later[0]}"
+            if not any(row.text.strip() == ask for row in _ours(chat, agent, LEDGER)):
+                await _say(city, LEDGER, ask)
+            chat = await _until(city, need_id, chat, lambda rows, p=later[0]: p in _page_spans(rows)[0])
+            if later[0] not in _page_spans(chat)[0]:
+                break
+        lines, _, _ = _world_lines(chat)
+        skip = _cancelled_slots(chat, agent, citizen) | _offered_slots(chat, agent, citizen)
+        later_slots = fitting(
+            lines, now=now, priority=None, lang=_lang(chat), procedure=procedure,
+            skip=skip, skip_facilities=_unreachable(chat, agent),
+        )
+        if later_slots:
+            sent.lines.add("beyond")
+            await _send_offers(
+                city, chat, key, citizen, later_slots, number=number, priority=priority,
+                procedure=procedure, tone=tone, relaxed=True, replacing=False, note=note, beyond=True,
+            )
+            return
+    await _release(city, key, citizen, number, tone)
+
+
+async def _release(city: City, key: str, citizen: str, number: str | None, tone: str) -> None:
+    """Chiudo con garbo: niente prenotazione, niente dati fuori, la porta resta aperta."""
+
+    head = "cancel reason=released" + (f" prescription_number={number}" if number else "")
+    await _once(city, key, "released", citizen, head + "\n" + tr("released", tone))
 
 
 # --- ASST partner ------------------------------------------------------------------------------------------
@@ -809,7 +907,7 @@ def _pending_choice(chat: list[Message], agent: str, citizen: str) -> str | None
     offers = _our_offers(chat, agent, citizen)
     chosen: str | None = None
     for row in chat:
-        if row.sender == citizen:
+        if row.sender == citizen and "cancel" not in words(row.text):
             pick = _chosen_offer(row.text, offers)
             if pick:
                 chosen = pick

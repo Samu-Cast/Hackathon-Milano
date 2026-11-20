@@ -24,7 +24,7 @@ def _rx_core(
         visit = _VISIT.get(procedure, ("una visita", "a visit"))[1]
         when = _WHEN.get(priority, ("", ""))[1]
         detail = f"{visit}, {when}" if when else visit
-        parts = ["Here is your renewed prescription." if renewal
+        parts = ["Here is your renewed referral." if renewal
                  else "Thank you for writing, I understand your concern."]
         if question and not renewal:
             parts.append(question)
@@ -33,7 +33,7 @@ def _rx_core(
             parts.append(_WAITING[1].strip())
         if anxious:
             parts.append("You did the right thing in writing: the visit is there to look into it properly.")
-        parts.append("Next step: book it with the CUP booking centre using this prescription number.")
+        parts.append("Next step: book it with the CUP booking centre using this referral number.")
         return " " + " ".join(parts)
     visit = _VISIT.get(procedure, ("una visita", "a visit"))[0]
     when = _WHEN.get(priority, ("", ""))[0]
@@ -110,7 +110,7 @@ def _extra_note(text: str, code: str) -> str:
     style = _style(text)
     watch = _WATCH.get(code)
     if english:
-        parts = ["Please bring your health card and this prescription number to the visit.",
+        parts = ["Please bring your health card and this referral number to the visit.",
                  "At the booking centre you can say which days and area suit you best."]
         if watch:
             parts.append(f"If {watch[1]} appears in the meantime, call 112 straight away.")
@@ -269,7 +269,7 @@ async def _no_symptom(city: City, message: Message, chat: list[Message], agent: 
             return
         text = (
             f"{_AFTER_RX[1]} to book the visit, write to the CUP booking centre with the "
-            "prescription number I sent you."
+            "referral number I sent you."
             if k
             else f"{_AFTER_RX[0]} per prenotare la visita scriva al CUP (centro prenotazioni) "
             "con il numero di ricetta che le ho mandato."
@@ -346,7 +346,7 @@ async def _renew(city: City, message: Message, chat: list[Message], agent: str, 
             await _say(
                 city,
                 citizen,
-                "I cannot find this prescription in the register: could you tell me in a few "
+                "I cannot find this referral in the register: could you tell me in a few "
                 "words what the visit was for? I will issue a new one."
                 if k
                 else "Non trovo questa ricetta nel registro: mi dice in poche parole per quale "
@@ -505,10 +505,10 @@ class _Gate:
 
 
 class _Sent:
-    """Offers this process sent for one need, which the case history may not show yet.
+    """Options this process sent for one need, which the case history may not show yet.
 
-    ``offers`` holds every slot id (and waiting-list offer id) sent. A cancel makes the
-    citizen drop all offers, so ``again`` holds only what was re-sent for ``trigger``.
+    ``options`` holds every slot id (and waiting-list option id) sent. A cancel makes the
+    citizen drop all options, so ``again`` holds only what was re-sent for ``trigger``.
     """
 
     __slots__ = ("offers", "trigger", "again")
@@ -827,7 +827,7 @@ async def _facility(
 
 
 def _booking_of(chat: list[Message], agent: str, slot_id: str) -> tuple[str, str, str | None]:
-    """Who asked us to book this slot, the consent, and the prescription, if we have them."""
+    """Who asked us to book this slot, the permission, and the referral, if we have them."""
 
     token = f"slot_id={slot_id}"
     sender = ""

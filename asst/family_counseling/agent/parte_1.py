@@ -95,6 +95,11 @@ async def _handle_turn(need: Need, city: City, message: Message) -> None:
             return
         fields = dict(interpreted.body) | fields_of(message.text)
         offers = _our_offers(case, city.agent_id)
+        if offers and (act == "cancel" or interpreted.type == "cancel" or "cancel" in words(message.text)):
+            # Il cittadino rifiuta un'offerta: non è una scelta. Quando le ha rifiutate tutte
+            # propongo altri orari liberi, altrimenti la lista d'attesa.
+            await _citizen_declined(city, message, case, offers)
+            return
         chosen = fields.get("offer_id") if fields.get("offer_id") in offers else None
         if not chosen and offers and not _awaiting_consent(case, city.agent_id, sender):
             # Livello 3: "prendo quello di martedì", "la seconda", "alle 10".
@@ -831,6 +836,22 @@ def _our_offers(chat: list[Message], agent: str) -> dict[str, dict[str, str]]:
     }
 
 
+async def _citizen_declined(
+    city: City, message: Message, case: list[Message], offers: dict[str, dict[str, str]]
+) -> None:
+    """Rifiuto di un'offerta. Se ne restano altre aspetto; quando sono rifiutate tutte cerco
+    altri orari (quelli rifiutati restano esclusi) o propongo la lista d'attesa."""
+
+    fresh = await city.history(need_id=message.need_id)
+    if all(row.msg_id != message.msg_id for row in fresh):
+        fresh = [*fresh, message]
+    gone = _withdrawn(fresh, city.agent_id)
+    still_open = [oid for oid, offer in offers.items() if offer.get("slot_id") and offer["slot_id"] not in gone]
+    if still_open:
+        return
+    await _advance(city, message, fresh, fixed="CONS-GIN", replacing=True)
+
+
 def _pending_choice(
     chat: list[Message], agent: str, citizen: str, offers: dict[str, dict[str, str]]
 ) -> str | None:
@@ -842,7 +863,7 @@ def _pending_choice(
             offer_id = fields_of(row.text).get("offer_id")
             if offer_id in offers:
                 chosen = offer_id
-        elif row.sender == citizen:
+        elif row.sender == citizen and "cancel" not in words(row.text):
             offer_id = fields_of(row.text).get("offer_id")
             if offer_id in offers:
                 chosen = offer_id

@@ -41,7 +41,7 @@ async def _on_choice(
     if offer.get("waiting_list", "").lower() == "true":
         done = (
             "Done: you are on the waiting list of the family counselling centre. You do not "
-            "need a prescription; we will propose a time as soon as one becomes free."
+            "need a referral; we will propose a time as soon as one becomes free."
             if tone == "en"
             else "Fatto: è in lista d'attesa al consultorio. Non serve la ricetta; le proporremo "
             "un orario appena se ne libera uno."
@@ -54,8 +54,8 @@ async def _on_choice(
     if not consent:
         if not _we(case, agent, f"offer_id={chosen}", to=citizen, word="consent"):
             prose = (
-                "Thank you for your choice! To book it I need your consent to use your booking "
-                "data (name and appointment) at the centre. No prescription is needed."
+                "Thank you for your choice! To book it I need your permission to use your booking "
+                "data (name and appointment) at the centre. No referral is needed."
                 if tone == "en"
                 else "Grazie per la scelta! Per prenotarla mi serve il suo consenso a usare i dati "
                 "della prenotazione (nominativo e appuntamento) al consultorio. Non serve la ricetta."
@@ -63,7 +63,7 @@ async def _on_choice(
             await _say(city, citizen, f"consent purpose=booking offer_id={chosen}\n" + prose)
         else:
             prose = (
-                "No problem: without your consent I will not book anything. If you change your "
+                "No problem: without your permission I will not book anything. If you change your "
                 "mind, just write to me and we will pick up from here."
                 if tone == "en"
                 else "Nessun problema: senza il suo consenso non prenoto nulla. Se cambia idea mi "
@@ -188,10 +188,10 @@ class _Gate:
 
 
 class _Sent:
-    """Offers this process sent for one need, which the case history may not show yet.
+    """Options this process sent for one need, which the case history may not show yet.
 
-    ``offers`` holds every slot id (and waiting-list offer id) sent. A cancel makes the
-    citizen drop all offers, so ``again`` holds only what was re-sent for ``trigger``.
+    ``options`` holds every slot id (and waiting-list option id) sent. A cancel makes the
+    citizen drop all options, so ``again`` holds only what was re-sent for ``trigger``.
     """
 
     __slots__ = ("offers", "trigger", "again")
@@ -339,7 +339,7 @@ async def _advance_alone(
     if tone == "en":
         prose = (
             "I looked carefully, but right now the family counselling centre has no free time "
-            "that suits you. The alternative I can offer is the waiting list: no prescription is "
+            "that suits you. The alternative I can option is the waiting list: no referral is "
             "needed, and we will propose a time as soon as one becomes free. If you agree, reply "
             "with the offer_id below."
         )
@@ -372,7 +372,7 @@ def _offers_text(
             )
         else:
             intro = "Here are the free times at the family counselling centre, from the earliest"
-        intro += " (direct access: no prescription is needed):"
+        intro += " (direct access: no referral is needed):"
         outro = (
             "To choose, reply with the offer_id of the option you prefer. If none of them works "
             "for you, just tell me."
@@ -421,7 +421,7 @@ async def _facility(
 
 
 def _booking_of(chat: list[Message], agent: str, slot_id: str) -> tuple[str, str, str | None]:
-    """Who asked us to book this slot, the consent, and the prescription, if we have them."""
+    """Who asked us to book this slot, the permission, and the referral, if we have them."""
 
     token = f"slot_id={slot_id}"
     sender = ""
@@ -554,7 +554,7 @@ async def _on_committed(city: City, message: Message, chat: list[Message]) -> No
             "1. Keep booking_id and ledger_ref: they are your proof of booking.",
             "2. On the day, check in at the centre" + (f" during the {window} slot" if window else "")
             + ", giving booking_id and ledger_ref.",
-            "3. No prescription is needed; bring an identity document.",
+            "3. No referral is needed; bring an identity document.",
         ]
     else:
         lines = ["Il suo appuntamento al consultorio è prenotato e registrato con firma. Ecco la ricevuta:", head]

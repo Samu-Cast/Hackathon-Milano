@@ -1,7 +1,7 @@
 """Care-protocol example. ``city init`` does not copy this file.
 
 The scaffold brain is ``templates/agent/agent/agent.py``. This one is the full care
-protocol (prescribe, offer, hold, commit, check-in, report), one inbound message per
+protocol (prescribe, option, hold, commit, check-in, report), one inbound message per
 step. The role is ``role`` in ``card.yaml``. Ledger writes are chat to ``city:ledger``;
 citizens read the act word and ``key=value`` tokens (ADR-110).
 """
@@ -334,7 +334,7 @@ def _via_cup(chat: list[Message]) -> str:
         )
     return (
         "Thank you! To protect you and your data, bookings go through the Booking Centre, "
-        "which checks the prescription and asks for your consent: choose the time there and "
+        "which checks the referral and asks for your permission: choose the time there and "
         "we will confirm it straight away."
     )
 
@@ -439,7 +439,7 @@ async def _tell_report(
         )
         if follow_up:
             lines.append(
-                "For the cardiology check-up I have prepared the prescription above (priority P, "
+                "For the cardiology check-up I have prepared the referral above (priority P, "
                 "planned): take it to the Booking Centre, which will put you on the waiting list."
             )
         lines.append("Thank you for your trust, and have a good day.")

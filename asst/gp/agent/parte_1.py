@@ -1,7 +1,7 @@
 """Care-protocol example. ``city init`` does not copy this file.
 
 The scaffold brain is ``templates/agent/agent/agent.py``. This one is the full care
-protocol (prescribe, offer, hold, commit, check-in, report), one inbound message per
+protocol (prescribe, option, hold, commit, check-in, report), one inbound message per
 step. The role is ``role`` in ``card.yaml``. Ledger writes are chat to ``city:ledger``;
 citizens read the act word and ``key=value`` tokens (ADR-110).
 """
@@ -720,7 +720,7 @@ _NO_SYMPTOM = (
     "Grazie per avermi scritto. Dal messaggio non riesco a capire il disturbo principale:",
     "Thank you for writing. I could not tell the main problem from your message:",
 )
-_AFTER_RX = ("Sono qui. La sua ricetta è pronta:", "I am here. Your prescription is ready:")
+_AFTER_RX = ("Sono qui. La sua ricetta è pronta:", "I am here. Your referral is ready:")
 
 
 def _lang_text(chat: list[Message], message: Message | None) -> str:

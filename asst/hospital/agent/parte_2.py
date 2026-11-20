@@ -230,10 +230,10 @@ class _Gate:
 
 
 class _Sent:
-    """Offers this process sent for one need, which the case history may not show yet.
+    """Options this process sent for one need, which the case history may not show yet.
 
-    ``offers`` holds every slot id (and waiting-list offer id) sent. A cancel makes the
-    citizen drop all offers, so ``again`` holds only what was re-sent for ``trigger``.
+    ``options`` holds every slot id (and waiting-list option id) sent. A cancel makes the
+    citizen drop all options, so ``again`` holds only what was re-sent for ``trigger``.
     """
 
     __slots__ = ("offers", "trigger", "again")
@@ -554,7 +554,7 @@ async def _facility(
 
 
 def _booking_of(chat: list[Message], agent: str, slot_id: str) -> tuple[str, str, str | None]:
-    """Who asked us to book this slot, the consent, and the prescription, if we have them."""
+    """Who asked us to book this slot, the permission, and the referral, if we have them."""
 
     token = f"slot_id={slot_id}"
     sender = ""
