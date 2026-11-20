@@ -8,19 +8,38 @@ Ogni turno e' senza stato: lo stato del caso si ricostruisce da
 from __future__ import annotations
 
 import re
+from typing import Any, Callable
 
-from city_sdk.city import LEDGER, City, Need
-
-# --- import difensivi: standard in city_sdk.city -----------------------------
+# --- Import ufficiali da city_sdk.city ---------------------------------------
 try:
-    from city_sdk.city import OutOfScope, clinical  # type: ignore
+    from city_sdk.city import LEDGER, City, Message, Need, OutOfScope, clinical  # type: ignore
 except ImportError:
     try:
-        from city_sdk import OutOfScope, clinical  # type: ignore
+        from city_sdk import LEDGER, City, Message, Need, OutOfScope, clinical  # type: ignore
     except ImportError:
+        LEDGER = "city:ledger"  # type: ignore
 
         class OutOfScope(Exception):  # type: ignore
             pass
+
+        class Need:  # type: ignore
+            summary: str = ""
+            is_emergency: bool = False
+
+        class Message:  # type: ignore
+            sender: str = ""
+            text: str = ""
+            need_id: str | None = None
+
+        class City:  # type: ignore
+            agent_id: str = ""
+            inbound: Message | None = None
+
+            async def say(self, to: str, text: str) -> None:
+                pass
+
+            async def history(self, *, need_id: str | None = None) -> list[Message]:
+                return []
 
         _CLINICAL = (
             "dosaggio", "posologia", "diagnosi", "che farmaco", "che medicina",
@@ -67,9 +86,9 @@ def first_word(text: str) -> str:
     return parts[0].strip(".,;:!?()\"'").lower() if parts else ""
 
 
-def row_text(row) -> str:
+def row_text(row: Any) -> str:
     if hasattr(row, "text") and row.text:
-        return row.text
+        return str(row.text)
     if hasattr(row, "content") and row.content:
         return str(row.content)
     if hasattr(row, "body") and isinstance(row.body, dict) and "text" in row.body:
@@ -85,7 +104,6 @@ def is_red_flag(text: str) -> bool:
 def parse_slots(text: str) -> list[dict[str, str]]:
     """Spezza la risposta di `world` in record: ne inizia uno a ogni slot_id."""
     slots: list[dict[str, str]] = []
-    # Nel Ledger ogni slot risiede su una riga separata
     for line in (text or "").splitlines():
         line_clean = line.strip()
         if not line_clean or "slot_id=" not in line_clean:
@@ -94,7 +112,6 @@ def parse_slots(text: str) -> list[dict[str, str]]:
         if "slot_id" in record:
             slots.append(record)
 
-    # Fallback se non ci fossero newlines
     if not slots and "slot_id=" in (text or ""):
         cur: dict[str, str] | None = None
         for key, val in KV.findall(text or ""):
@@ -107,10 +124,11 @@ def parse_slots(text: str) -> list[dict[str, str]]:
     return slots
 
 
-def find_citizen(case) -> str:
+def find_citizen(case: list[Any]) -> str:
     for row in case:
-        if getattr(row, "sender", "").startswith("citizen:"):
-            return row.sender
+        sender = getattr(row, "sender", "")
+        if sender.startswith("citizen:"):
+            return sender
     for row in case:
         fields = kv(row_text(row))
         for key in ("patient", "citizen"):
@@ -120,7 +138,7 @@ def find_citizen(case) -> str:
     return ""
 
 
-def last_value(case, key: str, skip_sender: str = "") -> str:
+def last_value(case: list[Any], key: str, skip_sender: str = "") -> str:
     """Ultimo valore di `key` visto nel caso (dal piu' recente)."""
     for row in reversed(case):
         if skip_sender and getattr(row, "sender", "") == skip_sender:
@@ -131,7 +149,7 @@ def last_value(case, key: str, skip_sender: str = "") -> str:
     return ""
 
 
-def last_sender_where(case, pred, exclude: set[str] | None = None) -> str:
+def last_sender_where(case: list[Any], pred: Callable[[str], bool], exclude: set[str] | None = None) -> str:
     ex = exclude or set()
     for row in reversed(case):
         sender = getattr(row, "sender", "")
@@ -142,7 +160,7 @@ def last_sender_where(case, pred, exclude: set[str] | None = None) -> str:
     return ""
 
 
-def already_said(case, self_id: str, needle: str) -> bool:
+def already_said(case: list[Any], self_id: str, needle: str) -> bool:
     return any(getattr(r, "sender", "") == self_id and needle in row_text(r) for r in case)
 
 
@@ -153,12 +171,12 @@ async def main(need: Need, city: City) -> None:
     message = city.inbound
     if message is None:
         return
-    text = (message.text or need.summary or "").strip()
+    text = (getattr(message, "text", "") or getattr(need, "summary", "") or "").strip()
     if not text:
         return
 
-    self_id = city.agent_id or "agent:s2tevpn8zkcj"
-    sender = message.sender
+    self_id = getattr(city, "agent_id", "") or "agent:s2tevpn8zkcj"
+    sender = getattr(message, "sender", "")
     if sender == self_id:
         return
 
@@ -166,12 +184,12 @@ async def main(need: Need, city: City) -> None:
     if text == "__error__":
         raise RuntimeError("application")
 
-    case = await city.history(need_id=message.need_id)
+    case = await city.history(need_id=getattr(message, "need_id", None))
     citizen = find_citizen(case) or (sender if sender.startswith("citizen:") else "")
 
     # ---------------- risposte del Ledger ----------------
     if sender in (LEDGER, "city:ledger"):
-        await on_ledger(city, self_id, case, citizen, text, message.need_id)
+        await on_ledger(city, self_id, case, citizen, text, getattr(message, "need_id", None))
         return
 
     if not (sender.startswith("citizen:") or sender.startswith("agent:")):
@@ -249,7 +267,7 @@ async def main(need: Need, city: City) -> None:
 # gestione risposte del Ledger
 # --------------------------------------------------------------------------- #
 async def on_ledger(
-    city: City, self_id: str, case, citizen: str, text: str, need_id: str | None
+    city: City, self_id: str, case: list[Any], citizen: str, text: str, need_id: str | None
 ) -> None:
     low = text.lower()
     t = kv(text)
@@ -308,7 +326,6 @@ async def on_ledger(
         if citizen and booking_id:
             if not already_said(case, self_id, "outcome_code=VISIT"):
                 await city.say(citizen, f"report booking_id={booking_id} outcome_code=VISIT")
-            # Se nel caso si fa riferimento a follow-up cardiologico
             has_followup = any("SYM-FOLLOWUP" in row_text(r).upper() for r in case)
             if has_followup and not already_said(case, self_id, "follow_up_of="):
                 await city.say(
@@ -340,7 +357,6 @@ async def on_ledger(
                 slot_id = s.get("slot_id")
                 if not slot_id:
                     continue
-                # Il Ledger usa 'at' per la data/ora ISO; supportiamo anche alias
                 date = s.get("at") or s.get("agenda_date") or s.get("date") or "-"
                 day = s.get("day") or s.get("agenda_day") or "-"
                 expiry = s.get("expiry") or date
