@@ -105,6 +105,7 @@ _KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "heart check-up",
             "heart checkup",
             "controllo al cuore",
+            "controllo per il cuore",
             "controllo cardiaco",
             "controllo periodico del cuore",
             "visita di controllo al cuore",
@@ -492,6 +493,14 @@ _RED_FLAG_PATTERNS = tuple(
         r"(?:\s+\w+){0,3}?\s*(?:le\s+|sulle\s+)?gamb[ae]\b",
         r"\bnon\s+mi\s+reggo\s+(?:più\s+)?(?:in\s+piedi|sulle\s+gambe)\b",
         r"\bgambe\s+(?:molto\s+|tutte\s+)?(?:deboli|molli)\b",
+        # Sicurezza del cittadino: respiro e svenimento non sono nel protocollo, ma sono
+        # emergenze vere. Meglio il 112 che una ricetta.
+        r"\b(?:non\s+riesco\s+(?:più\s+)?a|fatico\s+a|faccio\s+fatica\s+a)\s+respirare\b",
+        r"\bfame\s+d'aria\b",
+        r"\bmanca\s+(?:il\s+)?(?:respiro|fiato)\b",
+        r"\bcan(?:'|’|no)?t\s+breathe\b|\bcannot\s+breathe\b|\bshort(?:ness)?\s+of\s+breath\b",
+        r"\bsvenut[oa]\b|\bsvenimento\b|\bho\s+perso\s+i\s+sensi\b",
+        r"\bfainted\b|\bpassed\s+out\b",
         r"\b(?:loss|lost|losing)\s+(?:of\s+)?(?:the\s+)?strength\s+in\s+(?:my\s+|the\s+|both\s+)?legs?\b",
         r"\bweak(?:ness)?\s+in\s+(?:my|the|both)\s+legs?\b",
         r"\blegs?\s+(?:feel\s+|are\s+|is\s+)?(?:so\s+|very\s+)?(?:weak|giving\s+(?:way|out)|gave\s+(?:way|out))\b",
