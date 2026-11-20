@@ -254,11 +254,36 @@ async def _advance(
 
     # 6. Niente nella mia ASST: cerco nelle ASST partner, solo con i criteri.
     lines, _, _ = _world_lines(chat)
+    if _partner_search_stalled(chat, agent, citizen, latest, sent):
+        # Il cittadino ha riscritto e le ASST partner non hanno ancora mandato posti: chiudo la
+        # ricerca (i nostri posti li ho appena ricontrollati) e propongo l'alternativa.
+        await _no_slot_fallback(city, chat, key, citizen, number, procedure, priority, tone, note=note)
+        return
     if not (declined and "cross" in sent.flags) and await _cross_asst(
         city, chat, key, citizen, procedure, priority, _own_facilities(lines), tone, note
     ):
         return
     await _no_slot_fallback(city, chat, key, citizen, number, procedure, priority, tone, note=note)
+
+
+def _partner_search_stalled(
+    chat: list[Message], agent: str, citizen: str, latest: Message | None, sent: _Sent
+) -> bool:
+    """Ricerca presso le partner partita, nessuna loro offerta arrivata, e il cittadino ha
+    riscritto (non per dare un consenso o i dati richiesti)."""
+
+    if latest is None or "cross" not in sent.flags:
+        return False
+    heads = line_heads(latest.text) | words(latest.text)
+    if heads & {"consent", "data.response"} or fields_of(latest.text).get("consent_ref") or _CONSENT_BARE.search(latest.text):
+        return False
+    asked = [i for i, row in enumerate(chat) if row.sender == agent and "need.request" in line_heads(row.text)]
+    if not asked or not any(row.sender == citizen for row in chat[asked[0] + 1:]):
+        return False
+    return not any(
+        row.sender.startswith("agent:") and row.sender != agent and "offer" in line_heads(row.text)
+        for row in chat[asked[0]:]
+    )
 
 
 async def _citizen_declined(city: City, message: Message, key: str) -> None:
@@ -282,10 +307,15 @@ async def _citizen_declined(city: City, message: Message, key: str) -> None:
     ]
     if still_open:
         return
-    if any(offer.get("waiting_list") for offer in offers.values()) and not any(
-        offer.get("slot_id") and offer["slot_id"] not in gone for offer in offers.values()
-    ) and fields_of(message.text).get("offer_id", "").startswith("wl-"):
-        await _release(city, key, citizen, _number(chat), _tone(chat))
+    waiting = [oid for oid, offer in offers.items() if offer.get("waiting_list")]
+    if waiting and not any(offer.get("slot_id") and offer["slot_id"] not in gone for offer in offers.values()):
+        # Annulla prima di accettare la lista d'attesa: non lo iscrivo e glielo confermo.
+        offer_id = fields_of(message.text).get("offer_id") or waiting[-1]
+        _sent(key).flags.add(f"cancelled:{offer_id}")
+        await _once(
+            city, key, f"wl-left:{offer_id}", citizen,
+            f"cancel offer_id={offer_id} reason=citizen_cancelled\n" + tr("wl_left", _tone(chat)),
+        )
         return
     if _sent(key).lines & {f"declined-all:{len(offers)}"}:
         return
@@ -539,34 +569,10 @@ async def _no_slot_fallback(
     if priority == "P":
         await _waiting_list(city, chat, key, citizen, number, procedure, priority, tone, reason="P", note=note)
         return
-    agenda = _ledger(chat, "agenda") or {}
-    now = _when(agenda.get("agenda_now") or agenda.get("now") or "")
-    lines, _, _ = _world_lines(chat)
-    later: list[dict[str, str]] = []
-    if now is not None and lines:
-        later = fitting(
-            lines, now=now, priority="P", lang=_lang(chat), procedure=procedure,
-            skip=_cancelled_slots(chat, city.agent_id, citizen) | _citizen_cancelled(key),
-            skip_facilities=_unreachable(chat, city.agent_id),
-        )
-    sent = _sent(key)
-    if later:
-        picked = [slot for slot in later if slot["slot_id"] not in sent.offers][:_MAX_OFFERS]
-        if not picked:
-            return
-        intro = tr("beyond_intro", tone) + " " + tr("gp_note", tone)
-        if note:
-            intro = note + "\n" + intro
-        ids = [f"of-{slot['slot_id']}" for slot in picked]
-        text = _offers_text(picked, number=number, priority=priority, procedure=procedure,
-                            tone=tone, intro=intro, ids=ids)
-        if await _say(city, citizen, text):
-            sent.offers.update(slot["slot_id"] for slot in picked)
-        return
-    prose = tr("none_at_all", tone, label=_label(procedure, tone)) + " " + tr("gp_note", tone)
-    if note:
-        prose = note + "\n" + prose
-    await _once(city, key, "none_at_all", citizen, prose)
+    # Stesso ripiego per tutte le strade senza posti (U, B, D): le date subito dopo la scadenza,
+    # anche leggendo altre pagine del mondo; se non ci sono, o se il cittadino le ha già
+    # rifiutate, rilascio la richiesta con il passo successivo. Mai lista d'attesa.
+    await _beyond_or_release(city, chat, key, citizen, number, procedure, priority, tone, note)
 
 
 # --- ASST partner ------------------------------------------------------------------------------------------

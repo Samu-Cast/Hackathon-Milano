@@ -269,14 +269,16 @@ def _lang(chat: list[Message]) -> str:
     """La lingua del cittadino: il token lang= se c'è; altrimenti quella riconosciuta dal testo
     (livello 3: chi scrive in inglese senza dichiararlo deve avere un medico che parla inglese)."""
 
-    for row in _from_citizen(chat):
-        lang = fields_of(row.text).get("lang", "")
-        if lang:
-            return _lang_code(lang)
+    # La lingua del MEDICO: una richiesta esplicita vince sulla lingua in cui il cittadino
+    # scrive o che dichiara (che resta quella della conversazione, vedi _tone).
     for row in reversed(_from_citizen(chat)):
         asked = _lang_request(row.text)
         if asked:
             return asked
+    for row in _from_citizen(chat):
+        lang = fields_of(row.text).get("lang", "")
+        if lang:
+            return _lang_code(lang)
     for row in _from_citizen(chat):
         found = _detect_lang(row.text)
         if found:
@@ -347,7 +349,7 @@ _PERIOD_PM = re.compile(
     re.IGNORECASE,
 )
 _LANG_NAMES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("en", ("inglese", "english", "inglés", "ingles", "anglais", "inglês", "englisch", "engleză", "engleza", "الإنجليزية", "英语", "англійськ")),
+    ("en", ("inglese", "english", "anglofon", "inglés", "ingles", "anglais", "inglês", "englisch", "engleză", "engleza", "الإنجليزية", "英语", "англійськ")),
     ("pt", ("portoghese", "portuguese", "portugués", "portugues", "portugais", "português", "portugiesisch", "portugheză", "البرتغالية", "葡萄牙语", "португальськ")),
     ("es", ("spagnolo", "spanish", "español", "espanol", "espagnol", "espanhol", "spanisch", "spaniolă", "الإسبانية", "西班牙语", "іспанськ")),
     ("fr", ("francese", "french", "francés", "frances", "français", "francês", "französisch", "franceză", "الفرنسية", "法语", "французьк")),
@@ -359,7 +361,7 @@ _LANG_NAMES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("it", ("italiano", "italian", "italien", "italienisch", "italiană", "الإيطالية", "意大利语", "італійськ")),
 )
 _LANG_CUE = re.compile(
-    r"\b(parl[oa]|parliamo|speak|speaks|hablo|habla|falo|fala|parle|parlez|spreche|spricht|"
+    r"\b(parl\w*|speak\w*|anglofon\w*|hablo|habla|hablante|falo|fala|parle|parlez|spreche|spricht|sprechend\w*|"
     r"vorbesc|vorbește|in|en|em|auf|în|lingua|language|idioma|langue|língua|sprache|limba)\b"
     r"|أتكلم|أتحدث|说|讲|розмовляю|говорю|мовою",
     re.IGNORECASE,

@@ -264,7 +264,8 @@ def _natural_choice(text: str, offers: dict[str, dict[str, str]]) -> str | None:
     waiting = [oid for oid, offer in offers.items() if offer.get("waiting_list")]
     if not slots:
         # Solo la lista d'attesa sul tavolo: un sì a parole la sceglie.
-        return waiting[-1] if waiting and _choice_words(lowered) else None
+        refused = re.search(r"\b(no|non|not|don't|nope|cancel|annull\w*|rinunci\w*|rifiut\w*|decline\w*)\b", lowered)
+        return waiting[-1] if waiting and _choice_words(lowered) and not refused else None
     latest = slots[-_MAX_OFFERS:]
     picked: set[str] = set(slots)
     named = ordinal = False
