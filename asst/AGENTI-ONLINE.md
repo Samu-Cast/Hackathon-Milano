@@ -1,19 +1,20 @@
-# Agenti online della squadra epica (ASST asst-navigli)
+# Agenti della squadra epica (ASST asst-navigli)
 
-Aggiornato ven 20/11/2026 22:10. Questa cartella è la fonte unica: i deploy si fanno da qui.
+Aggiornato ven 20/11/2026 22:24. Questa cartella è la fonte unica: i deploy si fanno da qui, una persona sola.
 
-| Cartella | agent_id online | Prossima versione | Brain |
+| Cartella | agent_id online | Online adesso | Nel repo (prossimo deploy) |
 |---|---|---|---|
-| gp | agent:dn90g1skkx0f | 1.0.2 | medico di base v1.0.1: red flag allargate, domanda riformulata, tono adattato, rinnovo P1 |
-| booking_centre | agent:jgy1dj2sw2ew | 1.0.1 | esempio ufficiale del kit |
-| family_counseling | agent:drchwbffymha | 1.0.1 | esempio ufficiale + frase gentile al cittadino |
-| hospital | agent:gezf38x5940y | 1.0.1 | esempio ufficiale + frase gentile al cittadino |
-| specialist | agent:s2tevpn8zkcj | 1.0.1 | esempio ufficiale + frase gentile al cittadino (dalle 22:13, da mettere online) |
+| gp | agent:dn90g1skkx0f | 1.0.1: medico nuovo (red flag allargate, domanda riformulata, tono adattato, rinnovo P1) | 1.0.2: + proattività (tessera, preferenze per il CUP, segnale d'allarme dal protocollo) |
+| booking_centre | agent:jgy1dj2sw2ew | 1.0.0: esempio ufficiale del kit | 1.0.1: brain di Caterina (affermazioni, registro, CTRL-CARD, collaborazione), da provare prima del deploy |
+| family_counseling | agent:drchwbffymha | 1.0.0: esempio ufficiale + frase gentile | 1.0.1: brain di Elisa (v.1), da provare prima del deploy |
+| hospital | agent:gezf38x5940y | 1.0.0: esempio ufficiale + frase gentile | 1.0.1: uguale a quello online |
+| specialist | agent:s2tevpn8zkcj | vedi console (deploy dell'esempio completo in corso) | 1.0.2: esempio ufficiale + frase gentile |
 
-Deploy (dalla cartella padre degli agenti, una persona sola, un deploy alla volta):
+Deploy (dalla cartella padre degli agenti):
 
     cd ~/Desktop/Hackathon-Milano/asst
     city deploy <cartella>
 
+Ordine se si rifanno tutti: specialist, hospital, booking_centre, gp, family_counseling. Un deploy alla volta per agente.
 Mai `city retire` o `city delete`. Ritorno alla versione precedente senza coda: `city rollback agent:<cartella> --to <versione>`.
-Le card con gli agent_id di Samu (bdmy1m646zm8, j5txdgkvb34p, qak7dsxef0g6, mjf6vxpg8vvb) restano nella cronologia git.
+Usate sempre gli agent_id di questa tabella: un agent_id diverso nella card mette online un agente nuovo al posto di quello in gara.

@@ -10,5 +10,12 @@ role: booking_centre
 capabilities:
   - booking_centre
 no_clinical_advice: true
+languages:
+  - it
+  - en
+accessibility:
+  - plain_language
+  - step_by_step_instructions
+  - text_only_channel
 endpoints:
   mailbox: agent:jgy1dj2sw2ew
