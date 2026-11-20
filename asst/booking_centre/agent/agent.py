@@ -44,7 +44,7 @@ _LOG = logging.getLogger("booking_centre")
 # un minuto e mezzo reale, abbastanza per scelta, hold e commit.
 _LEAD = timedelta(minutes=90)
 _DEADLINE_DAYS = {"B": 2, "D": 5}
-_MAX_PAGE = 16  # richieste di pagina per turno: ricerca binaria (~8) più qualche pagina in ordine
+_MAX_PAGE = 24  # richieste di pagina per turno: ricerca binaria (~8) o lettura in ordine
 _MAX_OFFERS = 3
 _MAX_PARTNERS = 4
 _PULL_TRIES = 24
@@ -1178,15 +1178,46 @@ def _doctors(lines: list[str]) -> dict[str, tuple[frozenset[str], str, frozenset
         langs = fields.get("languages") or fields.get("langs") or fields.get("lang") or ""
         days = fields.get("days", "")
         found[doctor] = (
-            frozenset(part.lower() for part in _split(langs)),
+            frozenset(_lang_name(part) for part in _split(langs)),
             fields.get("gender", "").lower()[:1],
             frozenset(code for code in (_day_code(part) for part in _split(days)) if code),
         )
     return found
 
 
+def _doctor_key(doctor: str) -> str:
+    """La parte finale del codice medico, in minuscolo e senza zeri: "asst-navigli-S1",
+    "asst_navigli:s1", "S01" diventano tutti "s1"."""
+
+    parts = [part for part in re.split(r"[-_:/.\s]+", doctor.strip().lower()) if part]
+    key = parts[-1] if parts else ""
+    return re.sub(r"^([a-z]+)0+(\d)", r"\1\2", key)
+
+
+def _lang_name(raw: str) -> str:
+    """Una lingua scritta come codice o come nome ("EN", "eng", "english", "inglese") -> "en"."""
+
+    name = raw.strip().strip("[]{}()\"' ").lower()
+    names = {
+        "english": "en", "inglese": "en", "italian": "it", "italiano": "it", "spanish": "es",
+        "spagnolo": "es", "french": "fr", "francese": "fr", "german": "de", "tedesco": "de",
+        "portuguese": "pt", "portoghese": "pt", "romanian": "ro", "rumeno": "ro", "arabic": "ar",
+        "arabo": "ar", "chinese": "zh", "cinese": "zh", "ukrainian": "uk", "ucraino": "uk",
+    }
+    return names.get(name) or (_lang_code(name) if name != "*" else "*")
+
+
 def _spec(doctor: str, known: dict[str, tuple[frozenset[str], str, frozenset[str]]]):
-    return known.get(doctor) or _DOCTORS.get(doctor.rsplit("-", 1)[-1])
+    """Lingue, genere e giorni di un medico: prima dal mondo (stesso codice, anche con
+    maiuscole o separatori diversi), poi dalla tabella di ripiego."""
+
+    if doctor in known:
+        return known[doctor]
+    key = _doctor_key(doctor)
+    for name, spec in known.items():
+        if name.lower() == doctor.lower() or _doctor_key(name) == key:
+            return spec
+    return _DOCTORS.get(key)
 
 
 def _speaks(langs: frozenset[str], lang: str) -> bool:
@@ -1238,30 +1269,58 @@ def _page_spans(chat: list[Message]) -> tuple[dict[int, tuple[datetime | None, d
     return spans, total
 
 
+def _pages_sorted(spans: dict[int, tuple[datetime | None, datetime | None]]) -> bool | None:
+    """True se le pagine lette sono in ordine di data, False se non lo sono, None se non si
+    può ancora dire (una sola pagina con orari)."""
+
+    known = sorted((page, span) for page, span in spans.items() if span[0] is not None)
+    if len(known) < 2:
+        return None
+    for (_, (_, last)), (_, (first, _)) in zip(known, known[1:]):
+        if first is not None and last is not None and first < last:
+            return False
+    return True
+
+
 def _next_page(chat: list[Message], earliest: datetime, limit: datetime | None) -> int | None:
-    """Quale pagina chiedere adesso. Con una gara lunga le prime pagine sono date passate:
-    se gli slot sono in ordine di data salto a metà (ricerca binaria) fino alla prima pagina
-    con date da ``earliest`` in poi, poi proseguo in ordine finché supero ``limit``."""
+    """Quale pagina chiedere adesso.
+
+    Se le pagine sono in ordine di data (verificato su quelle lette) salto con la ricerca
+    binaria alla prima con orari da ``earliest`` in poi e proseguo fino a ``limit``. Se non lo
+    sono, o non si può ancora dire, le leggo una dopo l'altra: mai fermarsi su un'ipotesi."""
 
     spans, total = _page_spans(chat)
     if not spans:
         return 1
-    past = [page for page, (_, last) in spans.items() if last is not None and last < earliest]
-    future = sorted(page for page, (_, last) in spans.items() if last is not None and last >= earliest)
+    order = _pages_sorted(spans)
+    unseen = [page for page in range(1, total + 1) if page not in spans]
+    if not unseen:
+        return None
+    if order is False:
+        return unseen[0]
+    past = [p for p, (_, last) in spans.items() if last is not None and last < earliest]
+    future = sorted(p for p, (_, last) in spans.items() if last is not None and last >= earliest)
     low = max(past, default=0)
-    if not future or future[0] > low + 1:
+    if order is True and (not future or future[0] > low + 1):
         high = future[0] if future else total + 1
         wanted = max((low + high) // 2, low + 1)
         while wanted in spans and wanted < high:
             wanted += 1
-        return wanted if wanted <= total and wanted not in spans else None
-    page = future[0]
+        if wanted <= total and wanted not in spans:
+            return wanted
+    if order is None and not future:
+        # Solo pagine passate finora: provo a metà; se l'ordine non torna, il giro dopo lo vede.
+        wanted = max((low + total + 1) // 2, low + 1)
+        while wanted in spans and wanted < total:
+            wanted += 1
+        return wanted if wanted not in spans else unseen[0]
+    page = future[0] if future else (low + 1)
     while page in spans:
-        first, last = spans[page]
-        if limit is not None and last is not None and last >= limit:
-            return None  # oltre la scadenza: inutile sfogliare ancora
+        _, last = spans[page]
+        if order is True and limit is not None and last is not None and last >= limit:
+            return None  # in ordine di data e oltre la scadenza: inutile sfogliare ancora
         page += 1
-    return page if page <= total else None
+    return page if page <= total else (unseen[0] if order is not True else None)
 
 
 def normalize_slot(raw: dict[str, str]) -> dict[str, str] | None:
@@ -1340,7 +1399,7 @@ def fitting(
         if not 8 <= at.hour < 18:
             continue  # ambulatori aperti 08-18
         spec = _spec(doctor, known)
-        langs = frozenset(part.lower() for part in _split(slot.get("languages", ""))) or (
+        langs = frozenset(_lang_name(part) for part in _split(slot.get("languages", ""))) or (
             spec[0] if spec else frozenset()
         )
         if not _speaks(langs, lang):
@@ -2112,7 +2171,8 @@ async def _advance(
     if not _has_world(chat):
         return
     # Una nostra struttura sparita dalla discovery (ospedale giù): non offro i suoi slot.
-    skip_fac |= await _hidden_facilities(city, procedure, _own_facilities(_world_lines(chat)[0]))
+    # Un nostro slot si salta solo dopo un errore vero di invio alla struttura (TARGET_NOT_VISIBLE,
+    # vedi _unreachable): l'Index può non restituire un agente anche quando è online.
 
     strict = pick(chat, days=days, gender=gender)
     relaxed: list[dict[str, str]] = []

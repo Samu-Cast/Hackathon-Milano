@@ -500,34 +500,65 @@ def _searching(chat: list[Message], earliest: datetime) -> bool:
     """True finché la ricerca binaria non ha trovato la PRIMA pagina con orari futuri."""
 
     spans, _ = _page_spans(chat)
+    if _pages_sorted(spans) is not True:
+        return False  # pagine non in ordine (o non si sa ancora): va bene ciò che ho trovato
     past = [p for p, (_, last) in spans.items() if last is not None and last < earliest]
     future = sorted(p for p, (_, last) in spans.items() if last is not None and last >= earliest)
     return bool(future) and future[0] > max(past, default=0) + 1
 
 
+def _pages_sorted(spans: dict[int, tuple[datetime | None, datetime | None]]) -> bool | None:
+    """True se le pagine lette sono in ordine di data, False se non lo sono, None se non si
+    può ancora dire (una sola pagina con orari)."""
+
+    known = sorted((page, span) for page, span in spans.items() if span[0] is not None)
+    if len(known) < 2:
+        return None
+    for (_, (_, last)), (_, (first, _)) in zip(known, known[1:]):
+        if first is not None and last is not None and first < last:
+            return False
+    return True
+
+
 def _next_page(chat: list[Message], earliest: datetime, limit: datetime | None) -> int | None:
-    """Ricerca binaria fino alla prima pagina con orari da ``earliest`` in poi, poi in ordine
-    finché supero ``limit``. Funziona se il Ledger elenca gli slot in ordine di data."""
+    """Quale pagina chiedere adesso.
+
+    Se le pagine sono in ordine di data (verificato su quelle lette) salto con la ricerca
+    binaria alla prima con orari da ``earliest`` in poi e proseguo fino a ``limit``. Se non lo
+    sono, o non si può ancora dire, le leggo una dopo l'altra: mai fermarsi su un'ipotesi."""
 
     spans, total = _page_spans(chat)
     if not spans:
         return 1
+    order = _pages_sorted(spans)
+    unseen = [page for page in range(1, total + 1) if page not in spans]
+    if not unseen:
+        return None
+    if order is False:
+        return unseen[0]
     past = [p for p, (_, last) in spans.items() if last is not None and last < earliest]
     future = sorted(p for p, (_, last) in spans.items() if last is not None and last >= earliest)
     low = max(past, default=0)
-    if not future or future[0] > low + 1:
+    if order is True and (not future or future[0] > low + 1):
         high = future[0] if future else total + 1
         wanted = max((low + high) // 2, low + 1)
         while wanted in spans and wanted < high:
             wanted += 1
-        return wanted if wanted <= total and wanted not in spans else None
-    page = future[0]
+        if wanted <= total and wanted not in spans:
+            return wanted
+    if order is None and not future:
+        # Solo pagine passate finora: provo a metà; se l'ordine non torna, il giro dopo lo vede.
+        wanted = max((low + total + 1) // 2, low + 1)
+        while wanted in spans and wanted < total:
+            wanted += 1
+        return wanted if wanted not in spans else unseen[0]
+    page = future[0] if future else (low + 1)
     while page in spans:
         _, last = spans[page]
-        if limit is not None and last is not None and last >= limit:
-            return None
+        if order is True and limit is not None and last is not None and last >= limit:
+            return None  # in ordine di data e oltre la scadenza: inutile sfogliare ancora
         page += 1
-    return page if page <= total else None
+    return page if page <= total else (unseen[0] if order is not True else None)
 
 
 async def _serve_partner(city: City, message: Message, chat: list[Message], default: str) -> None:
