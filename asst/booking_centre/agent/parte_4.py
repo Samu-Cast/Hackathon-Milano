@@ -553,17 +553,38 @@ async def _beyond_or_release(
         # Seconda alternativa: entro la scadenza, allentando la lingua del medico (se ne aveva
         # chiesta una diversa dall'italiano). Le due vanno nello stesso messaggio.
         doctor_lang = _lang(chat)
-        in_time = []
-        if doctor_lang not in ("", "it") and not _rejected_for(chat, agent, citizen, "lang"):
-            in_time = fitting(
-                lines, now=now, priority=priority, lang="it", procedure=procedure,
-                skip=skip | {slot["slot_id"] for slot in later_slots},
-                skip_facilities=_unreachable(chat, agent), skip_doctors=bad_doctors,
+        horizon = _horizon(now, priority)
+        still_in_time = [slot for slot in later_slots if horizon is None or (_when(slot["at"]) or now) < horizon]
+        if still_in_time:
+            # Trovate solo leggendo altre pagine, ma ENTRO la scadenza: offerte normali, senza
+            # dire "dopo la scadenza".
+            await _send_offers(
+                city, chat, key, citizen, still_in_time, number=number, priority=priority,
+                procedure=procedure, tone=tone, relaxed=False, replacing=False, note=note,
             )
+            return
+        in_time: list[dict[str, str]] = []
+        alt_lang = ""
+        if doctor_lang not in ("", "it"):
+            # Allento la lingua del medico, entro la scadenza: prima la lingua in cui il cittadino
+            # ci scrive (la conosce), poi l'italiano, ma non se ha già rifiutato per lingua.
+            chat_lang = _tone(chat)
+            tries = [code for code in (chat_lang,) if code not in ("", "it", doctor_lang)]
+            if not _rejected_for(chat, agent, citizen, "lang"):
+                tries.append("it")
+            for code in tries:
+                in_time = fitting(
+                    lines, now=now, priority=priority, lang=code, procedure=procedure,
+                    skip=skip | {slot["slot_id"] for slot in later_slots},
+                    skip_facilities=_unreachable(chat, agent), skip_doctors=bad_doctors,
+                )
+                if in_time:
+                    alt_lang = code
+                    break
         if later_slots or in_time:
             sent.lines.add("beyond")
             picked = (later_slots[:2] + in_time[:1]) if (later_slots and in_time) else (later_slots or in_time)
-            intro = _relaxed_intro(tone, procedure, doctor_lang, bool(later_slots), bool(in_time))
+            intro = _relaxed_intro(tone, procedure, doctor_lang, bool(later_slots), bool(in_time), alt_lang or "it")
             await _send_offers(
                 city, chat, key, citizen, picked, number=number, priority=priority,
                 procedure=procedure, tone=tone, relaxed=True, replacing=False, note=note, beyond=True,

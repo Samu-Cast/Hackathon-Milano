@@ -602,9 +602,9 @@ def _spec(doctor: str, known: dict[str, tuple[frozenset[str], str, frozenset[str
 def _speaks(langs: frozenset[str], lang: str) -> bool:
     if not langs:
         return lang in {"it", ""}
-    if lang in langs:
-        return True
-    return "*" in langs and lang not in {"it", "en"}
+    # "*" nella tabella di ripiego vuol dire "una lingua rara che non conosciamo": non la faccio
+    # valere per qualunque lingua (000141, 000142: lang=ti, h3 rifiutato per lingua).
+    return lang in langs
 
 
 def _horizon(now: datetime, priority: str | None, extend: bool = False) -> datetime | None:

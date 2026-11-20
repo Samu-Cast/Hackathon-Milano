@@ -230,38 +230,44 @@ async def _resend_offers(city: City, chat: list[Message], key: str, citizen: str
 # --- percorsi falliti della wave: confirm senza ricevuta, alternativa che dichiara il vincolo ---
 
 _LANG_LABEL = {
-    "it": {"en": "inglese", "es": "spagnolo", "fr": "francese", "de": "tedesco", "pt": "portoghese",
+    "it": {"ti": "tigrino", "am": "amarico", "so": "somalo", "ka": "georgiano", "ru": "russo",
+           "en": "inglese", "es": "spagnolo", "fr": "francese", "de": "tedesco", "pt": "portoghese",
            "ro": "rumeno", "ar": "arabo", "zh": "cinese", "uk": "ucraino"},
-    "en": {"en": "English", "es": "Spanish", "fr": "French", "de": "German", "pt": "Portuguese",
+    "en": {"ti": "Tigrinya", "am": "Amharic", "so": "Somali", "ka": "Georgian", "ru": "Russian",
+           "en": "English", "es": "Spanish", "fr": "French", "de": "German", "pt": "Portuguese",
            "ro": "Romanian", "ar": "Arabic", "zh": "Chinese", "uk": "Ukrainian"},
 }
 
 
-def _relaxed_intro(tone: str, procedure: str | None, doctor_lang: str, later: bool, in_time: bool) -> str:
+def _relaxed_intro(
+    tone: str, procedure: str | None, doctor_lang: str, later: bool, in_time: bool, alt_lang: str = "it"
+) -> str:
     """Intro dell'alternativa: dice quale vincolo allento (scadenza o lingua), senza promettere
     date entro la scadenza che non ci sono."""
 
     label = _label(procedure, tone)
     if tone == "it":
         lang = _LANG_LABEL["it"].get(doctor_lang, doctor_lang)
+        alt = "italiano" if alt_lang == "it" else _LANG_LABEL["it"].get(alt_lang, alt_lang)
         if later and in_time:
             return (f"Entro la scadenza della priorità non c'è un medico che parli {lang} per la sua {label}, "
                     f"né da noi né nelle ASST partner. Per trasparenza le propongo due strade: le prime "
                     f"opzioni sono con un medico che parla {lang}, subito DOPO la scadenza; l'ultima è "
-                    f"ENTRO la scadenza, con un medico che parla italiano. Scelga lei:")
+                    f"ENTRO la scadenza, con un medico che parla {alt}. Scelga lei:")
         if in_time:
             return (f"Entro la scadenza non c'è un medico che parli {lang} per la sua {label}. Per "
-                    f"trasparenza le propongo date entro la scadenza con un medico che parla italiano:")
+                    f"trasparenza le propongo date entro la scadenza con un medico che parla {alt}:")
         return tr("offers_beyond", tone, label=label)
     lang = _LANG_LABEL["en"].get(doctor_lang, doctor_lang)
+    alt = "Italian" if alt_lang == "it" else _LANG_LABEL["en"].get(alt_lang, alt_lang)
     if later and in_time:
         return (f"Within the deadline of your priority there is no doctor who speaks {lang} for your {label}, "
                 f"neither here nor in partner ASSTs. To be transparent, here are two ways: the first options "
                 f"are with a doctor who speaks {lang}, just AFTER the deadline; the last one is WITHIN the "
-                f"deadline, with a doctor who speaks Italian. It is your choice:")
+                f"deadline, with a doctor who speaks {alt}. It is your choice:")
     if in_time:
         return (f"Within the deadline there is no doctor who speaks {lang} for your {label}. To be "
-                f"transparent, here are dates within the deadline with a doctor who speaks Italian:")
+                f"transparent, here are dates within the deadline with a doctor who speaks {alt}:")
     return tr("offers_beyond", tone, label=label)
 
 
