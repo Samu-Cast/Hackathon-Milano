@@ -778,7 +778,7 @@ def _question(code: str, style: str, english: bool) -> str:
     return f"Mi chiede quale visita fare per {subject[0]}."
 
 
-def _rx_note(
+def _rx_core(
     text: str, procedure: str, priority: str, *, renewal: bool = False, code: str = ""
 ) -> str:
     """Frase dopo i token della ricetta: domanda, risposta, passo successivo."""
@@ -862,6 +862,52 @@ def _rx_note(
     else:
         parts.append("Prossimo passo: prenoti dal CUP (centro prenotazioni) con questo numero di ricetta.")
     return " " + " ".join(parts)
+
+
+# Proattività (squadra epica): informazioni utili non richieste, dopo il passo successivo.
+# Il segnale d'allarme viene dalla tabella di protocollo (red flag): nessuna diagnosi.
+_WATCH = {
+    "SYM-BACK": ("perdita di forza alle gambe", "loss of strength in your legs"),
+    "SYM-PALPITATIONS": ("dolore al petto", "chest pain"),
+}
+
+
+def _extra_note(text: str, code: str) -> str:
+    english = _english(text)
+    style = _style(text)
+    watch = _WATCH.get(code)
+    if english:
+        parts = ["Please bring your health card and this prescription number to the visit.",
+                 "At the booking centre you can say which days and area suit you best."]
+        if watch:
+            parts.append(f"If {watch[1]} appears in the meantime, call 112 straight away.")
+        return " " + " ".join(parts)
+    if style == "informal":
+        parts = ["Alla visita porta la tessera sanitaria e questo numero di ricetta.",
+                 "Al CUP puoi dire i giorni e la zona che ti vanno meglio."]
+        if watch:
+            parts.append(f"Se nel frattempo compare {watch[0]}, chiama subito il 112.")
+        return " " + " ".join(parts)
+    if style == "simple":
+        parts = ["Alla visita porti la tessera sanitaria e questo numero.",
+                 "Al CUP può dire i giorni e la zona che preferisce."]
+        if watch:
+            parts.append(f"Se arriva {watch[0]}, chiami subito il 112.")
+        return " " + " ".join(parts)
+    parts = ["Alla visita porti la tessera sanitaria e questo numero di ricetta.",
+             "Al CUP può indicare i giorni e la zona che le sono più comodi."]
+    if watch:
+        parts.append(f"Se nel frattempo dovesse comparire {watch[0]}, chiami subito il 112.")
+    return " " + " ".join(parts)
+
+
+def _rx_note(
+    text: str, procedure: str, priority: str, *, renewal: bool = False, code: str = ""
+) -> str:
+    note = _rx_core(text, procedure, priority, renewal=renewal, code=code)
+    if not code:
+        code = {"VIS-CARD": "SYM-PALPITATIONS"}.get(procedure, "") if priority == "B" else ""
+    return note + _extra_note(text, code)
 
 
 def _emergency_note(text: str) -> str:
