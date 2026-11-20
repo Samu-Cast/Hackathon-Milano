@@ -597,7 +597,8 @@ _LANG_WORDS = {
            "un", "le", "ci"},
 }
 _PREF_MARK = re.compile(
-    r"\b(preferisc\w*|preferirei|vorrei|se possibile|meglio|magari|ideally|prefer\w*|would like|"
+    r"\b(preferisc\w*|preferirei|vorrei|se possibile|se si può|se si puo|possibilmente|"
+    r"preferibilmente|tipo|meglio|magari|ideally|prefer\w*|would like|"
     r"i'd like|rather|if possible|solo (?:il|di)|ginecologa|dottoressa|female doctor|male doctor)\b"
 )
 _SINCE_DAY = re.compile(

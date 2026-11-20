@@ -1181,7 +1181,8 @@ def _detect_lang(text: str) -> str:
 
 # Una preferenza scritta a parole: "vorrei il martedì", "ideally on Monday", "una dottoressa".
 _PREF_MARK = re.compile(
-    r"\b(preferisc\w*|preferirei|vorrei|se possibile|meglio|magari|ideally|prefer\w*|would like|"
+    r"\b(preferisc\w*|preferirei|vorrei|se possibile|se si può|se si puo|possibilmente|"
+    r"preferibilmente|tipo|meglio|magari|ideally|prefer\w*|would like|"
     r"i'd like|rather|if possible|solo (?:il|di)|male doctor|female doctor|medico donna|"
     r"medico uomo)\b"
 )
