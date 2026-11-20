@@ -1,7 +1,7 @@
-agent_id: agent:qak7dsxef0g6
+agent_id: agent:drchwbffymha
 team: team:epica
 name: family_counseling
-version: 1.0.0
+version: 1.0.1
 cap_versions:
   - "1.0"
 profiles:
@@ -11,4 +11,4 @@ capabilities:
   - family_counseling.gynecology
 no_clinical_advice: true
 endpoints:
-  mailbox: agent:qak7dsxef0g6
+  mailbox: agent:drchwbffymha

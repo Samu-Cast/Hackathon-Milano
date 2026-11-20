@@ -1,7 +1,7 @@
-agent_id: agent:j5txdgkvb34p
+agent_id: agent:jgy1dj2sw2ew
 team: team:epica
 name: booking_centre
-version: 1.0.0
+version: 1.0.1
 cap_versions:
   - "1.0"
 profiles:
@@ -11,4 +11,4 @@ capabilities:
   - booking_centre
 no_clinical_advice: true
 endpoints:
-  mailbox: agent:j5txdgkvb34p
+  mailbox: agent:jgy1dj2sw2ew
