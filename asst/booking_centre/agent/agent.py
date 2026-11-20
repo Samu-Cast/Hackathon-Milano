@@ -318,7 +318,7 @@ def _split(value: str) -> list[str]:
 
 def _lang_of_text(text: str) -> str:
     lang = fields_of(text).get("lang", "").lower()
-    return "en" if lang.startswith("en") else "it"
+    return "it" if lang in {"", "it", "ita"} else "en"
 
 
 # --- storia del caso ------------------------------------------------------------------------------
@@ -410,7 +410,31 @@ def _lang(chat: list[Message]) -> str:
 
 
 def _tone(chat: list[Message]) -> str:
-    return "en" if _lang(chat).startswith("en") else "it"
+    """Lingua delle frasi: italiano per chi scrive in italiano, inglese per tutti gli altri
+    (per chi non parla italiano l'inglese è più accessibile)."""
+
+    lang = _lang(chat)
+    return "it" if lang in {"", "it", "ita"} else "en"
+
+
+# Una riga nella lingua del cittadino, quando le frasi sono in inglese per lui.
+_LANG_LINE = {
+    "fr": "Je vous écris en anglais pour être clair, et je vous propose seulement des médecins qui parlent votre langue.",
+    "es": "Le escribo en inglés para ser claro, y solo le propongo médicos que hablan su idioma.",
+    "de": "Ich schreibe Ihnen auf Englisch, damit alles klar ist, und schlage Ihnen nur Ärztinnen und Ärzte vor, die Ihre Sprache sprechen.",
+    "pt": "Escrevo-lhe em inglês para ser claro e só lhe proponho médicos que falam a sua língua.",
+    "ro": "Vă scriu în engleză ca să fie clar și vă propun doar medici care vorbesc limba dumneavoastră.",
+    "ar": "أكتب لك بالإنجليزية للوضوح، وأقترح عليك فقط أطباء يتحدثون لغتك.",
+    "zh": "为了清楚起见，我用英语给您写信，并且只为您推荐会说您语言的医生。",
+    "uk": "Я пишу вам англійською для ясності й пропоную лише лікарів, які розмовляють вашою мовою.",
+    "ru": "Я пишу вам по-английски для ясности и предлагаю только врачей, которые говорят на вашем языке.",
+    "sq": "Ju shkruaj në anglisht që të jetë e qartë dhe ju propozoj vetëm mjekë që flasin gjuhën tuaj.",
+    "pl": "Piszę po angielsku dla jasności i proponuję tylko lekarzy, którzy mówią w Pana/Pani języku.",
+}
+
+
+def _lang_line(chat: list[Message]) -> str:
+    return _LANG_LINE.get(_lang(chat)[:2], "")
 
 
 def _days_from(text: str) -> set[str] | None:
@@ -457,7 +481,9 @@ def _gender_from(text: str) -> str | None:
 def _asked_prefs_at(chat: list[Message], agent: str, citizen: str) -> int | None:
     for index, row in enumerate(chat):
         if row.sender == agent and row.recipient == citizen and "data.request" in line_heads(row.text):
-            if "purpose=booking" in row.text and "fields=days" in row.text:
+            if "purpose=booking" in row.text and (
+                "fields=days" in row.text or "fields=gender" in row.text
+            ):
                 return index
     return None
 
@@ -1163,6 +1189,9 @@ async def _advance(
             injected=_injection(latest.text),
             clinical_words=clinical(latest.text),
         )
+    guard = note  # solo gli avvisi, senza la riga di lingua
+    if _lang_line(chat):
+        note = (_lang_line(chat) + "\n" + note).strip()
 
     # 1. Il numero di ricetta. Senza, lo chiedo (al massimo due volte, poi aspetto).
     number = _number(chat)
@@ -1253,7 +1282,58 @@ async def _advance(
 
     # Preferenze: ricetta verificata, le chiedo una volta sola (giorni, genere del medico).
     days, gender, answered = _preferences(chat, agent, citizen)
-    asked_prefs = _asked_prefs_at(chat, agent, citizen) is not None
+    asked_at = _asked_prefs_at(chat, agent, citizen)
+    asked_prefs = asked_at is not None
+    if (
+        (days is None) != (gender is None)
+        and not asked_prefs
+        and not (replacing or refresh)
+    ):
+        # Una preferenza è già nel primo messaggio: chiedo solo quella che manca.
+        if "prefs" in sent.lines:
+            return
+        sent.lines.add("prefs")
+        label = _label(procedure, tone)
+        if days is not None:
+            field = "gender"
+            names = (_DAY_EN if tone == "en" else _DAY_IT)
+            listed = ", ".join(names[code] for code in _DAYS if code in days)
+            prose = (
+                f"Thank you, your prescription for a {label} is valid and I have noted the days "
+                f"you prefer ({listed}). One last thing: do you prefer a female or male doctor? "
+                "If it makes no difference, just tell me and I will look for the first date."
+                if tone == "en"
+                else f"Grazie, la sua ricetta per una {label} è valida e ho preso nota dei giorni "
+                f"che preferisce ({listed}). Un'ultima cosa: preferisce un medico donna o uomo? "
+                "Se per lei è indifferente me lo dica pure, e cerco la prima data utile."
+            )
+        else:
+            field = "days"
+            who = (
+                ("a female doctor" if gender == "f" else "a male doctor")
+                if tone == "en"
+                else ("un medico donna" if gender == "f" else "un medico uomo")
+            )
+            prose = (
+                f"Thank you, your prescription for a {label} is valid and I have noted that you "
+                f"prefer {who}. One last thing: are there days of the week that suit you best? "
+                "If any day is fine, just tell me and I will look for the first date."
+                if tone == "en"
+                else f"Grazie, la sua ricetta per una {label} è valida e ho preso nota che "
+                f"preferisce {who}. Un'ultima cosa: ci sono giorni della settimana che le vanno "
+                "meglio? Se va bene qualsiasi giorno me lo dica pure, e cerco la prima data utile."
+            )
+        text = f"data.request purpose=booking fields={field}\n" + prose
+        if note:
+            text += "\n" + note
+        await _say(city, citizen, text)
+        return
+    if (
+        asked_at is not None
+        and not replacing
+        and not any(row.sender == citizen for row in chat[asked_at + 1 :])
+    ):
+        return  # ho chiesto la preferenza che mancava: aspetto la risposta
     if days is None and gender is None and not asked_prefs and not (replacing or refresh):
         if "prefs" in sent.lines:
             return
@@ -1288,8 +1368,8 @@ async def _advance(
         slot for slot in sent.offers if not slot.startswith("wl-")
     }
     if offered and not (replacing or refresh):
-        if note and latest is not None:
-            await _say(city, citizen, note)
+        if guard and latest is not None:
+            await _say(city, citizen, guard)
         return  # le offerte sono già sul tavolo: il cittadino sta scegliendo
     if now is None:
         return
@@ -1328,6 +1408,8 @@ async def _advance(
             break
     if not _has_world(chat):
         return
+    # Una nostra struttura sparita dalla discovery (ospedale giù): non offro i suoi slot.
+    skip_fac |= await _hidden_facilities(city, procedure, _own_facilities(_world_lines(chat)[0]))
 
     strict = pick(chat, days=days, gender=gender)
     relaxed: list[dict[str, str]] = []
@@ -1395,6 +1477,30 @@ def _cancelled_slots(chat: list[Message], agent: str, citizen: str) -> set[str]:
         if fields.get("slot_id"):
             gone.add(fields["slot_id"])
     return gone
+
+
+async def _hidden_facilities(city: City, procedure: str | None, facilities: set[str]) -> set[str]:
+    """Strutture del mondo che l'Index non restituisce più (es. ospedale sospeso dalla città).
+
+    Prudente: una struttura è "nascosta" solo se l'Index risponde con altri agenti ma non con
+    lei, sia cercando il servizio sia cercando il suo id. Se l'Index tace non salto nulla."""
+
+    service = _SERVICE_OF.get(procedure or "", "")
+    candidates = {fac for fac in facilities if fac.startswith("agent:")}
+    if not service or not candidates:
+        return set()
+    seen: set[str] = set()
+    answered = False
+    for query in (service, *sorted(candidates)):
+        try:
+            peers = await city.find(query)
+        except CapError:
+            return set()
+        answered = answered or bool(peers)
+        seen.update(peer.agent_id for peer in peers)
+    if not answered:
+        return set()
+    return candidates - seen
 
 
 def _unreachable(chat: list[Message], agent: str) -> set[str]:
@@ -1634,6 +1740,8 @@ async def _cross_asst(
         peers = await city.find(service)
     except CapError:
         peers = []
+    # Le nostre strutture non sono partner, anche se oggi non hanno slot nel mondo.
+    own = set(own) | set(_team_facilities().values())
     partners = [
         peer
         for peer in peers
@@ -1744,7 +1852,7 @@ async def _partner_offer(city: City, message: Message, chat: list[Message], key:
     if not lines:
         return
     world, _, _ = _world_lines(chat)
-    if message.sender in _own_facilities(world):
+    if message.sender in _own_facilities(world) or message.sender in _team_facilities().values():
         return
     usable = fitting(lines, now=now, priority=priority, lang=_lang(chat), procedure=procedure,
                      skip=_cancelled_slots(chat, city.agent_id, citizen))
