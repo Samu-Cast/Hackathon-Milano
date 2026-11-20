@@ -170,6 +170,7 @@ _ASKS_CLINICAL = re.compile(
 _NUMBER_BARE = re.compile(r"\b(prescription_number-[A-Za-z0-9][A-Za-z0-9-]{2,60})")
 _NUMBER_RX = re.compile(r"\b(RX-[A-Za-z0-9][A-Za-z0-9-]{2,60})\b")
 _CONSENT_BARE = re.compile(r"\b(cons-[A-Za-z0-9][A-Za-z0-9_-]{2,80})")
+_CLEAN_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}")
 _OK_STATES = {"", "issued", "valid", "active", "ok", "open"}
 _EXPIRED_STATES = {"expired", "scaduta", "lapsed"}
 
@@ -2096,10 +2097,12 @@ async def _on_confirm(
         await _say(city, citizen, f"consent purpose=cross_asst offer_id={offer_id}\n" + prose)
         return
 
-    need = message.need_id or ""
-    if not booking_ref and need.startswith("N-"):
-        # Il consenso di prenotazione del cittadino ha il riferimento cons-<need_id>-booking.
-        booking_ref = f"cons-{need}-booking"
+    # Sicurezza e fiducia: un consenso non si indovina mai. Se il cittadino non l'ha dato lo
+    # chiedo (sotto); uso solo riferimenti puliti, senza spazi o caratteri strani.
+    if booking_ref and not _CLEAN_REF.fullmatch(booking_ref):
+        booking_ref = None
+    if cross_ref and not _CLEAN_REF.fullmatch(cross_ref):
+        cross_ref = None
     if not booking_ref and not cross_ref:
         if not _we(chat, agent, "purpose=booking", to=citizen, head="consent"):
             prose = (
@@ -2294,6 +2297,8 @@ async def _forward_receipt(city: City, message: Message, chat: list[Message], ke
             + (f" during the {window} slot" if window else "")
             + ", giving booking_id and ledger_ref.",
             "3. Bring your prescription and an identity document.",
+            "Your data is used only for this booking and shared only with the facility that "
+            "will see you.",
             "If you need assistance getting there or inside the facility (mobility, sight, "
             "hearing), tell the facility when you check in. If you can, public transport is a "
             "convenient and greener way to get there.",
@@ -2311,6 +2316,8 @@ async def _forward_receipt(city: City, message: Message, chat: list[Message], ke
             + (f" nella fascia {window}" if window else "")
             + ", indicando booking_id e ledger_ref.",
             "3. Porti con sé la ricetta e un documento d'identità.",
+            "I suoi dati sono usati solo per questa prenotazione e condivisi solo con la "
+            "struttura che la visiterà.",
             "Se le serve assistenza per arrivare o muoversi nella struttura (difficoltà "
             "motorie, visive o uditive), lo dica alla struttura al check-in. Se può, i mezzi "
             "pubblici sono un modo comodo e più sostenibile per arrivarci.",
