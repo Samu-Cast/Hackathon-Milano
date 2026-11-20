@@ -6,8 +6,112 @@ import logging
 import re
 from collections import OrderedDict
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from city_sdk.city import LEDGER, CapError, City, Message, Need, clinical, understood
+
+def _escalation_text(tone: str) -> str:
+    if tone == "en":
+        return (
+            "escalate.emergency reason=red_flag\n"
+            "What you describe needs to be looked at straight away, before any appointment. "
+            "Please call 112 now or go to the nearest emergency department. If someone is with "
+            "you, ask them to stay close. The emergency team is the right help right now."
+        )
+    return (
+        "escalate.emergency reason=red_flag\n"
+        "Quello che mi descrive va valutato subito, prima di qualsiasi appuntamento. Chiami ora "
+        "il 112 oppure si rechi al pronto soccorso più vicino. Se c'è qualcuno con lei, gli "
+        "chieda di restarle accanto. I soccorritori sono l'aiuto giusto in questo momento."
+    )
+
+
+def _when_text(value: str, tone: str) -> str:
+    at = _when(value)
+    if at is None:
+        return value
+    day = _DAY_KEYS[at.weekday()]
+    if tone == "en":
+        return f"{_DAY_EN.get(day, day)} {at.day} {at.strftime('%B')} at {at:%H:%M}"
+    return f"{_DAY_IT.get(day, day)} {at.day} {_MONTH_IT[at.month - 1]} alle ore {at:%H:%M}"
+
+
+def _bare_consent(text: str) -> str | None:
+    hit = _CONSENT_BARE.search(text)
+    return hit.group(1) if hit else None
+
+
+def _our_offers(chat: list[Message], agent: str) -> dict[str, dict[str, str]]:
+    citizen = _citizen(chat)
+    return {
+        line["offer_id"]: line
+        for line in _offer_lines(chat, agent, citizen)
+        if line.get("offer_id")
+    }
+
+
+async def _citizen_declined(
+    city: City, message: Message, case: list[Message], offers: dict[str, dict[str, str]]
+) -> None:
+    """Rifiuto di un'offerta. Se ne restano altre aspetto; quando sono rifiutate tutte cerco
+    altri orari (quelli rifiutati restano esclusi) o propongo la lista d'attesa."""
+
+    fresh = await city.history(need_id=message.need_id)
+    if all(row.msg_id != message.msg_id for row in fresh):
+        fresh = [*fresh, message]
+    gone = _withdrawn(fresh, city.agent_id)
+    still_open = [oid for oid, offer in offers.items() if offer.get("slot_id") and offer["slot_id"] not in gone]
+    if still_open:
+        return
+    await _advance(city, message, fresh, fixed="CONS-GIN", replacing=True)
+
+
+def _pending_choice(
+    chat: list[Message], agent: str, citizen: str, offers: dict[str, dict[str, str]]
+) -> str | None:
+    """L'offerta per cui abbiamo chiesto il consenso, o l'ultima nominata dal cittadino."""
+
+    chosen: str | None = None
+    for row in chat:
+        if row.sender == agent and row.recipient == citizen and first_word(row.text) == "consent":
+            offer_id = fields_of(row.text).get("offer_id")
+            if offer_id in offers:
+                chosen = offer_id
+        elif row.sender == citizen and "cancel" not in words(row.text):
+            offer_id = fields_of(row.text).get("offer_id")
+            if offer_id in offers:
+                chosen = offer_id
+    return chosen
+
+
+def _awaiting_consent(chat: list[Message], agent: str, citizen: str) -> bool:
+    """Abbiamo chiesto il consenso e non abbiamo ancora mandato l'hold."""
+
+    asked = None
+    for index, row in enumerate(chat):
+        if row.sender == agent and row.recipient == citizen and first_word(row.text) == "consent":
+            asked = index
+    if asked is None:
+        return False
+    return not any(
+        row.sender == agent and row.recipient == LEDGER and first_word(row.text) == "hold"
+        for row in chat[asked:]
+    )
+
+
+def _requester(chat: list[Message], agent: str, slot: str) -> str:
+    """Il CUP (agente) che ci ha chiesto di prenotare questo slot, se c'è."""
+
+    token = f"slot_id={slot}"
+    for row in chat:
+        if (
+            row.sender.startswith("agent:")
+            and row.sender != agent
+            and "confirm" in words(row.text)
+            and token in row.text.split()
+        ):
+            return row.sender
+    return ""
+
 
 async def _on_choice(
     city: City,
@@ -267,6 +371,9 @@ async def _advance_alone(
     now = _when(agenda.get("agenda_now", ""))
     world = _latest_slots(fresh_replies(chat))
     if now is None or world is None:
+        text = _message(chat, "partial")
+        if not _exact(chat, agent, text):
+            await _say(city, citizen, text)
         return
     # Gara lunga (~64 giorni di catalogo): le prime pagine sono date passate. Sfoglio in questo
     # stesso turno, saltando con la ricerca binaria alla prima pagina con orari da adesso in poi.
@@ -339,7 +446,7 @@ async def _advance_alone(
     if tone == "en":
         prose = (
             "I looked carefully, but right now the family counselling centre has no free time "
-            "that suits you. The alternative I can option is the waiting list: no referral is "
+            "that suits you. The alternative I can propose is the waiting list: no referral is "
             "needed, and we will propose a time as soon as one becomes free. If you agree, reply "
             "with the offer_id below."
         )
@@ -477,7 +584,8 @@ async def _finish_booking(
     if not hold_id:
         return
     done = await _await_line(
-        city, message.need_id, fresh, "committed", f"booking_id={hold_id}", op="commit"
+        city, message.need_id, fresh, "committed", f"hold_id={hold_id}", op="commit",
+        alternate_tokens=(f"slot_id={slot}", f"booking_id={hold_id}"),
     )
     if done is None:
         _LOG.info("care.commit.missing", extra={"need_id": (message.need_id or "")[:48]})
@@ -580,7 +688,7 @@ async def _on_refused(
         for row in chat:
             fields = fields_of(row.text)
             if row.sender == LEDGER and first_word(row.text) == "committed" and fields.get("booking_id") == event["booking_id"]:
-                slot = fields.get("slot_id", "")
+                slot = fields.get("slot_id", "") or _hold_slot(chat, agent, fields.get("hold_id", ""))
     if not slot and first_word(message.text) == "refused":
         for row in chat:
             if row.sender == agent and row.recipient == LEDGER and first_word(row.text) == "hold":

@@ -1,4 +1,4 @@
-# booking_centre: parte_2.py di 4 (vedi agent.py)
+# booking_centre: parte_2.py di 5 (vedi agent.py)
 from __future__ import annotations
 
 import asyncio
@@ -10,6 +10,142 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from city_sdk.city import LEDGER, CapError, City, Message, Need, OutOfScope, clinical, understood
+
+def _lang_code(raw: str) -> str:
+    code = raw.strip().lower().replace("_", "-").split("-")[0]
+    aliases = {"ua": "uk", "cn": "zh", "ar": "ar", "eng": "en", "ita": "it", "esp": "es", "spa": "es", "fra": "fr", "por": "pt", "deu": "de", "ger": "de", "rum": "ro", "ron": "ro"}
+    return aliases.get(code, code)
+
+
+def tr(key: str, lang: str, **kwargs: object) -> str:
+    """Una frase del catalogo nella lingua del cittadino (ripiego: inglese, poi italiano)."""
+
+    table = _TX.get(key, {})
+    template = table.get(lang) or table.get("en") or table.get("it") or key
+    try:
+        return template.format(**kwargs)
+    except (KeyError, IndexError, ValueError):
+        return template
+
+
+# --- ingresso ------------------------------------------------------------------------------------
+
+
+async def main(need: Need, city: City) -> None:
+    message = city.inbound
+    if message is None:
+        return
+    if message.sender == city.agent_id:
+        return
+    text = message.text or need.summary or ""
+
+    # Emergenza dichiarata dall'harness o dal need: ci si ferma e si escala.
+    body = understood(message).body if message.type == "chat" else message.body
+    if (need.is_emergency or body.get("is_emergency") is True) and message.sender != LEDGER:
+        await _say(city, message.sender, _escalation_text(_lang_of_text(text)))
+        return
+
+    # Rifiuto solo una vera domanda clinica (diagnosi, dose) che non porta nulla da prenotare.
+    # Una frase come "il medico mi ha fatto la diagnosi, ecco la ricetta" è un'affermazione:
+    # si prenota e si ricorda con garbo che sul piano clinico decide il medico.
+    if (
+        not message.sender.startswith("agent:")
+        and message.sender != LEDGER
+        and clinical(text)
+        and _ASKS_CLINICAL.search(text)
+        and not _has_booking_tokens(text)
+    ):
+        raise OutOfScope()
+
+    try:
+        chat = await city.history(need_id=message.need_id)
+    except CapError:
+        chat = []
+    if all(row.msg_id != message.msg_id for row in chat):
+        chat = [*chat, message]
+
+    street = _own_street(city)
+    if street and _asks_address(message):
+        await _say(city, message.sender, f"address={street}")
+        return
+    try:
+        await _desk(city, message, chat)
+    except (OutOfScope, asyncio.CancelledError):
+        raise
+    except Exception:  # noqa: BLE001 - un errore di logica non deve lasciare il caso fermo
+        _LOG.exception("booking.turn.error", extra={"need_id": (message.need_id or "")[:48]})
+
+
+# --- lettura del testo ----------------------------------------------------------------------------
+
+
+def words(text: str) -> set[str]:
+    return {token.strip(".,;:!?()\"'«»").lower() for token in text.split() if token.strip()}
+
+
+def first_word(text: str) -> str:
+    parts = text.split()
+    return parts[0].strip(".,;:!?()\"'").lower() if parts else ""
+
+
+def line_heads(text: str) -> set[str]:
+    """Il primo token di ogni riga: è lì che scriviamo (e cerchiamo) la parola dell'atto."""
+
+    return {first_word(line) for line in text.splitlines() if line.strip()}
+
+
+def fields_of(text: str) -> dict[str, str]:
+    """Primo valore di ogni ``chiave=valore`` nel testo."""
+
+    found: dict[str, str] = {}
+    # Separo solo sugli spazi: "days=lun,mar,mer" resta una lista; "a=1, b=2" funziona perché
+    # la virgola finale viene tolta dal valore.
+    for token in text.replace(";", " ").split():
+        key, eq, value = token.partition("=")
+        key = key.strip("([{\"'«")
+        if not eq or not key or not value:
+            continue
+        value = value.strip(".,;:!?)]}\"'»")
+        if key not in found and value:
+            found[key] = value
+    return found
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.lower().replace("’", "'").split())
+
+
+def _has_booking_tokens(text: str) -> bool:
+    fields = fields_of(text)
+    if any(key in fields for key in ("prescription_number", "offer_id", "slot_id", "consent_ref")):
+        return True
+    return bool(_NUMBER_BARE.search(text) or _NUMBER_RX.search(text))
+
+
+def _number_in(text: str) -> str | None:
+    """Il numero di ricetta in una frase: come token, oppure scritto così com'è."""
+
+    number = fields_of(text).get("prescription_number")
+    if number:
+        return number
+    for pattern in (_NUMBER_BARE, _NUMBER_RX):
+        hit = pattern.search(text)
+        if hit:
+            return hit.group(1).rstrip(".,;:!?-")
+    # Testo libero: "la ricetta è N-2026-11-02-890907000042" (il medico scrive il numero con il
+    # prefisso prescription_number-, il cittadino a volte lo omette).
+    hit = _NUMBER_N.search(text)
+    if hit:
+        return "prescription_number-" + hit.group(1)
+    return None
+
+
+def _red_flag(text: str) -> bool:
+    lowered = _norm(text)
+    if fields_of(text).get("is_emergency", "").lower() == "true":
+        return True
+    return any(flag in lowered for flag in _RED_FLAGS)
+
 
 def _injection(text: str) -> bool:
     lowered = _norm(text)
@@ -138,6 +274,10 @@ def _lang(chat: list[Message]) -> str:
         if lang:
             return _lang_code(lang)
     for row in reversed(_from_citizen(chat)):
+        asked = _lang_request(row.text)
+        if asked:
+            return asked
+    for row in _from_citizen(chat):
         found = _detect_lang(row.text)
         if found:
             return found
@@ -158,6 +298,10 @@ def _tone(chat: list[Message]) -> str:
         code = _lang_code(declared)
         return code if code in _LANGS else "en"
     for row in reversed(_from_citizen(chat)):
+        asked = _lang_request(row.text)
+        if asked:
+            return asked
+    for row in reversed(_from_citizen(chat)):
         found = _detect_lang(row.text)
         if found:
             return found
@@ -170,8 +314,104 @@ def _lang_line(chat: list[Message]) -> str:
     return ""
 
 
+_WORKDAYS = ("mon", "tue", "wed", "thu", "fri")
+_PREF_CUE = re.compile(
+    r"\b(prefer|preferisc|preferirei|vorrei|meglio|solo|soltanto|possibilmente|disponibile|"
+    r"riesco|posso|only|would like|i'd like|available|can do|can come|prefiero|preferiría|"
+    r"solo puedo|puedo|je préfère|je prefere|seulement|je peux|prefiro|preferia|só posso|"
+    r"posso ir|lieber|nur|ich kann|am liebsten|prefer|doar|pot|tranne|eccetto|escluso|except|"
+    r"excepto|sauf|exceto|außer|cu excepția|mattina|pomeriggio|morning|afternoon|dottoressa|"
+    r"medico donna|medico uomo|doctora|ärztin|parlo|speak|hablo|falo|parle|spreche|vorbesc)",
+    re.IGNORECASE,
+)
+_NEG_CUE = re.compile(
+    r"\b(non|tranne|eccetto|escluso|esclusi|except|excepto|menos|sauf|exceto|außer|nicht|"
+    r"fără|fara|cu excepția|no puedo|no me va|no el|not on|can't|cannot|can not|not available|"
+    r"pas le|pas disponible|não posso|nao posso|não dá|kann nicht|nu pot|nu e bine)\b",
+    re.IGNORECASE,
+)
+# "ho mal di schiena da martedì": il giorno è l'inizio del sintomo, non una preferenza.
+_SINCE = re.compile(
+    r"(\bda|\bdal|\bdalla|\bdallo|\bsince|\bdesde|\bdepuis|\bseit|\bdin|\bfrom|від|منذ|从)\s*"
+    r"(il |lo |la |the |el |le |o |a |last |scorso |pasado |dernier |letzten )?$",
+    re.IGNORECASE,
+)
+_PERIOD_AM = re.compile(
+    r"\b(mattina|mattino|mattutin|morning|por la mañana|en la mañana|matin|matinée|de manhã|"
+    r"manhã|vormittag|morgens|dimineața|dimineata)\b|上午|早上|зранку|вранці|صباح",
+    re.IGNORECASE,
+)
+_PERIOD_PM = re.compile(
+    r"\b(pomeriggio|afternoon|por la tarde|en la tarde|après-midi|apres-midi|à tarde|de tarde|"
+    r"nachmittag|nachmittags|după-amiaza|dupa-amiaza|după amiază)\b|下午|після обіду|по обіді|مساء|بعد الظهر",
+    re.IGNORECASE,
+)
+_LANG_NAMES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("en", ("inglese", "english", "inglés", "ingles", "anglais", "inglês", "englisch", "engleză", "engleza", "الإنجليزية", "英语", "англійськ")),
+    ("pt", ("portoghese", "portuguese", "portugués", "portugues", "portugais", "português", "portugiesisch", "portugheză", "البرتغالية", "葡萄牙语", "португальськ")),
+    ("es", ("spagnolo", "spanish", "español", "espanol", "espagnol", "espanhol", "spanisch", "spaniolă", "الإسبانية", "西班牙语", "іспанськ")),
+    ("fr", ("francese", "french", "francés", "frances", "français", "francês", "französisch", "franceză", "الفرنسية", "法语", "французьк")),
+    ("de", ("tedesco", "german", "alemán", "aleman", "allemand", "alemão", "deutsch", "germană", "الألمانية", "德语", "німецьк")),
+    ("ro", ("rumeno", "romanian", "rumano", "roumain", "romeno", "rumänisch", "română", "romana", "الرومانية", "罗马尼亚语", "румунськ")),
+    ("ar", ("arabo", "arabic", "árabe", "arabe", "arabisch", "arabă", "العربية", "阿拉伯语", "арабськ")),
+    ("zh", ("cinese", "chinese", "chino", "chinois", "chinês", "chinesisch", "chineză", "الصينية", "中文", "汉语", "китайськ")),
+    ("uk", ("ucraino", "ukrainian", "ucraniano", "ukrainien", "ukrainisch", "ucraineană", "الأوكرانية", "乌克兰语", "українськ")),
+    ("it", ("italiano", "italian", "italien", "italienisch", "italiană", "الإيطالية", "意大利语", "італійськ")),
+)
+_LANG_CUE = re.compile(
+    r"\b(parl[oa]|parliamo|speak|speaks|hablo|habla|falo|fala|parle|parlez|spreche|spricht|"
+    r"vorbesc|vorbește|in|en|em|auf|în|lingua|language|idioma|langue|língua|sprache|limba)\b"
+    r"|أتكلم|أتحدث|说|讲|розмовляю|говорю|мовою",
+    re.IGNORECASE,
+)
+
+
+def _lang_request(text: str) -> str | None:
+    """Lingua chiesta a parole: "parlo solo inglese", "un medico che parli portoghese"."""
+
+    lowered = _norm(text)
+    if not _LANG_CUE.search(lowered):
+        return None
+    for code, names in _LANG_NAMES:
+        if any(name in lowered for name in names):
+            return code
+    return None
+
+
+def _period_from(text: str) -> str | None:
+    raw = (fields_of(text).get("time_of_day") or fields_of(text).get("period") or "").lower()
+    if raw in {"am", "morning", "mattina"}:
+        return "am"
+    if raw in {"pm", "afternoon", "pomeriggio"}:
+        return "pm"
+    am = bool(_PERIOD_AM.search(text))
+    pm = bool(_PERIOD_PM.search(text))
+    if am != pm:
+        return "am" if am else "pm"
+    return None
+
+
+def _day_mentions(text: str) -> list[tuple[str, int]]:
+    """Giorni nominati nel testo, con la posizione."""
+
+    lowered = _norm(text)
+    found: list[tuple[str, int]] = []
+    for code, names in _DAY_WORDS:
+        for name in names:
+            if len(name) <= 3:
+                for hit in re.finditer(rf"\b{re.escape(name)}\b", lowered):
+                    found.append((code, hit.start()))
+            else:
+                start = lowered.find(name)
+                while start >= 0:
+                    found.append((code, start))
+                    start = lowered.find(name, start + 1)
+    return found
+
+
 def _days_from(text: str) -> set[str] | None:
-    """Giorni preferiti: dal token ``days=`` o dalle parole della frase. None = non detto."""
+    """Giorni preferiti: dal token ``days=`` o dalle parole della frase. None = non detto.
+    Capisce anche le esclusioni: "tutti i giorni tranne il lunedì", "non posso venerdì"."""
 
     raw = fields_of(text).get("days") or fields_of(text).get("day")
     if raw:
@@ -180,18 +420,27 @@ def _days_from(text: str) -> set[str] | None:
             for part in re.split(r"[/,|+]", raw)
             if part[:3].lower() in _DAYS
         }
+        found = {code for code in (_day_code(part) for part in re.split(r"[/,|+]", raw)) if code}
         if found:
             return found
     lowered = _norm(text)
-    found = set()
-    for code, names in _DAY_WORDS:
-        for name in names:
-            if len(name) <= 3:
-                if re.search(rf"\b{name}\b", lowered):
-                    found.add(code)
-            elif name in lowered:
-                found.add(code)
-    return found or None
+    include: set[str] = set()
+    exclude: set[str] = set()
+    for code, pos in _day_mentions(text):
+        before = lowered[max(0, pos - 28):pos]
+        if _SINCE.search(before):
+            continue
+        # La negazione vale se è vicina e nella stessa frase ("non posso il lunedì").
+        clause = re.split(r"[.;!?]| ma | but | pero | mais | mas | aber | dar ", before)[-1]
+        if _NEG_CUE.search(clause):
+            exclude.add(code)
+        else:
+            include.add(code)
+    if include - exclude:
+        return include - exclude
+    if exclude:
+        return set(_WORKDAYS) - exclude
+    return None
 
 
 def _gender_from(text: str) -> str | None:
@@ -239,19 +488,33 @@ def _preferences(
             continue
         after = asked is not None and index > asked
         fields = fields_of(row.text)
+        cue = bool(_PREF_CUE.search(row.text))
         said_days, said_gender = _natural_prefs(row.text)  # "vorrei il martedì", "ideally a man"
-        if after or "days" in fields or "day" in fields:
+        if after or cue or "days" in fields or "day" in fields:
             days = _days_from(row.text) or days
         elif said_days:
             days = said_days
-        if after or "gender" in fields or "gender_preference" in fields:
+        if after or cue or "gender" in fields or "gender_preference" in fields:
             gender = _gender_from(row.text) or gender
         elif said_gender:
             gender = said_gender
         if after:
             answered = True
-    answered = answered or days is not None or gender is not None
+    answered = answered or days is not None or gender is not None or _period(chat, agent, citizen) is not None
     return days, gender, answered
+
+
+def _period(chat: list[Message], agent: str, citizen: str) -> str | None:
+    """Mattina o pomeriggio, se il cittadino l'ha detto come preferenza."""
+
+    asked = _asked_prefs_at(chat, agent, citizen)
+    found: str | None = None
+    for index, row in enumerate(chat):
+        if not row.sender.startswith("citizen:"):
+            continue
+        if (asked is not None and index > asked) or _PREF_CUE.search(row.text) or "period" in row.text:
+            found = _period_from(row.text) or found
+    return found
 
 
 # --- mondo: slot e medici --------------------------------------------------------------------------
@@ -472,6 +735,7 @@ def fitting(
     procedure: str | None,
     days: set[str] | None = None,
     gender: str | None = None,
+    period: str | None = None,
     skip: set[str] | frozenset[str] = frozenset(),
     skip_facilities: set[str] | frozenset[str] = frozenset(),
     extend: bool = False,
@@ -522,6 +786,8 @@ def fitting(
         if spec and spec[2] and day not in spec[2]:
             continue  # il cittadino verifica i giorni di lavoro del medico sul registro
         if days and day not in days:
+            continue
+        if period == "am" and at.hour >= 13 or period == "pm" and at.hour < 13:
             continue
         doc_gender = (slot.get("gender") or (spec[1] if spec else "")).lower()[:1]
         if gender and doc_gender != gender:
@@ -625,290 +891,19 @@ def _offers_text(
 # --- messaggi in uscita -------------------------------------------------------------------------------
 
 
-async def _say(city: City, to: str, text: str) -> bool:
-    """Un solo invio. Un rifiuto (4xx) chiude quella richiesta: non si ritenta mai."""
-
-    try:
-        await city.say(to, _fit(text))
-    except CapError as err:
-        _LOG.info("booking.say.refused", extra={"code": getattr(err, "code", ""), "to": to[:64]})
-        return False
-    return True
-
-
-async def _say_or_code(city: City, to: str, text: str) -> str:
-    """Come ``_say`` ma restituisce il codice di errore ("" se l'invio è andato)."""
-
-    try:
-        await city.say(to, _fit(text))
-    except CapError as err:
-        return str(getattr(err, "code", "") or "REFUSED")
-    return ""
-
-
-async def _until(
-    city: City,
-    need_id: str | None,
-    chat: list[Message],
-    ready: Callable[[list[Message]], bool],
-) -> list[Message]:
-    """Rilegge il caso finché ``ready`` o finché la breve attesa finisce."""
-
-    fresh = chat
-    for attempt in range(_PULL_TRIES):
-        try:
-            fresh = await city.history(need_id=need_id)
-        except CapError:
-            fresh = chat
-        if ready(fresh):
-            return fresh
-        if attempt + 1 < _PULL_TRIES:
-            await asyncio.sleep(_PULL_PAUSE)
-    return fresh
-
-
-# --- memoria di processo e lock per caso -----------------------------------------------------------------
-
-
-class _Gate:
-    __slots__ = ("lock", "turns")
-
-    def __init__(self) -> None:
-        self.lock = asyncio.Lock()
-        self.turns = 0
-
-
-class _Sent:
-    """Cosa abbiamo già mandato per un caso, anche se la storia non lo mostra ancora."""
-
-    __slots__ = ("offers", "lines", "flags")
-
-    def __init__(self) -> None:
-        self.offers: set[str] = set()  # slot_id (o offer_id della lista d'attesa) offerti
-        self.lines: set[str] = set()  # chiavi di messaggi una-tantum
-        self.flags: set[str] = set()
-
-
-_GATES: dict[str, _Gate] = {}
-_SENT: OrderedDict[str, _Sent] = OrderedDict()
-_ADDRESSES: dict[str, str] = {}
-
-
-def _sent(key: str) -> _Sent:
-    entry = _SENT.get(key)
-    if entry is None:
-        entry = _SENT[key] = _Sent()
-        while len(_SENT) > _SENT_NEEDS:
-            _SENT.popitem(last=False)
-    else:
-        _SENT.move_to_end(key)
-    return entry
-
-
-async def _once(city: City, key: str, tag: str, to: str, text: str) -> bool:
-    """Manda ``text`` una sola volta per caso e per ``tag``."""
-
-    sent = _sent(key)
-    if tag in sent.lines:
-        return False
-    sent.lines.add(tag)
-    return await _say(city, to, text)
-
-
-async def _locked(key: str, work: Callable[[], object]) -> None:
-    gate = _GATES.get(key)
-    if gate is None:
-        gate = _GATES[key] = _Gate()
-    gate.turns += 1
-    try:
-        async with gate.lock:
-            await work()  # type: ignore[misc]
-    finally:
-        gate.turns -= 1
-        if gate.turns == 0 and _GATES.get(key) is gate:
-            del _GATES[key]
-
-
-# --- strutture: dall'etichetta del registro all'agente ---------------------------------------------
-
-
-def _team_facilities() -> dict[str, str]:
-    table = dict(_TEAM_FACILITIES)
-    for part in os.environ.get("CITY_TEAM_FACILITIES", "").split(","):
-        key, _, value = part.partition("=")
-        if key.strip() and value.strip().startswith("agent:"):
-            table[key.strip()] = value.strip()
-    return table
-
-
-async def _facility_agent(city: City, facility: str, procedure: str | None) -> str:
-    """L'agente a cui mandare il ``confirm``. Il registro può nominare la struttura per tipo
-    ("hospital", "asst-navigli-hospital"): in quel caso uso l'agente della nostra ASST."""
-
-    if facility.startswith("agent:"):
-        return facility
-    table = _team_facilities()
-    lowered = facility.lower()
-    family = next((key for key in ("family_counseling", "specialist", "hospital") if key in lowered), "")
-    if not family and ("counsel" in lowered or "consult" in lowered):
-        family = "family_counseling"
-    if not family:
-        family = _FAMILY_OF.get(procedure or "", "")
-    known = table.get(family, "")
-    service = _SERVICE_OF.get(procedure or "", "")
-    if service:
-        try:
-            peers = await city.find(service)
-        except CapError:
-            peers = []
-        ids = {peer.agent_id for peer in peers}
-        if known and known in ids:
-            return known
-        # Ripiego: un agente con lo stesso nome della struttura del registro.
-        for peer in peers:
-            if lowered and lowered in peer.agent_id.lower():
-                return peer.agent_id
-    return known or facility
-
-
-def _confirmed_slot(chat: list[Message], agent: str, slot: str) -> str:
-    """A chi abbiamo già girato il ``confirm`` di questo slot ("" se a nessuno)."""
-
-    token = f"slot_id={slot}"
-    for row in _ours(chat, agent):
-        for line in row.text.splitlines():
-            if first_word(line) == "confirm" and token in line.split():
-                return row.recipient
-    return ""
-
-
-async def _ack(city: City, message: Message, key: str, text: str) -> None:
-    """Risposta breve e immediata a un altro agente (collaborazione e fast-reply). Niente parole
-    d'atto né codici di prestazione, così nessun brain la legge come una nuova richiesta."""
-
-    await _once(city, key, f"ack:{message.msg_id}", message.sender, text)
-
-
-# --- smistamento ---------------------------------------------------------------------------------------
-
-
-def _our_offers(chat: list[Message], agent: str, citizen: str) -> dict[str, dict[str, str]]:
-    """offer_id -> campi, per ogni offerta che abbiamo mandato al cittadino."""
-
-    found: dict[str, dict[str, str]] = {}
-    for row in _ours(chat, agent, citizen):
-        for line in row.text.splitlines():
-            if first_word(line) != "offer":
-                continue
-            fields = fields_of(line)
-            if fields.get("offer_id"):
-                found[fields["offer_id"]] = fields
-    return found
-
-
-def _chosen_offer(text: str, offers: dict[str, dict[str, str]]) -> str | None:
-    """L'offerta che il cittadino ha nominato: come token, come slot, o scritta così com'è."""
-
-    # Un cittadino che annulla o rifiuta non sta scegliendo (anche se nomina l'offer_id).
-    if "cancel" in words(text) or first_word(text) == "cancel":
-        return None
-    fields = fields_of(text)
-    if fields.get("offer_id") in offers:
-        return fields["offer_id"]
-    slot = fields.get("slot_id")
-    if slot:
-        for offer_id, offer in offers.items():
-            if offer.get("slot_id") == slot:
-                return offer_id
-    bare = words(text)
-    for offer_id in sorted(offers, key=len, reverse=True):
-        if offer_id.lower() in bare or offer_id in text:
-            return offer_id
-    return _natural_choice(text, offers)
-
-
-# --- livello 3: richieste in linguaggio naturale -------------------------------------------------
-
-_ORDINALS = (
-    (0, r"prim[ao]|first|1st|opzione\s*1|option\s*1|numero\s*1"),
-    (1, r"second[ao]|second|2nd|opzione\s*2|option\s*2|numero\s*2"),
-    (2, r"terz[ao]|third|3rd|opzione\s*3|option\s*3|numero\s*3"),
-    (-1, r"ultim[ao]|the\s+last(?:\s+one)?"),
-)
-_MONTH_NUM = {
-    name.lower(): index
-    for names in (_MONTHS["it"], _MONTHS["en"])
-    for index, name in enumerate(names, start=1)
+# Dati del cittadino che non devono MAI uscire verso un altro agente (minimizzazione, GDPR):
+# servono al massimo a lui. Verso strutture e partner passano solo id del cittadino, ricetta e
+# consenso, e verso le ASST partner solo dopo il consenso cross_asst.
+_PRIVATE_KEYS = {
+    "tax_code", "codice_fiscale", "address", "indirizzo", "age", "eta", "disability", "occupation",
+    "car", "car_euro_class", "phone", "telefono", "email", "name", "nome", "surname", "cognome",
+    "birth_date", "dob", "lang", "gender",
 }
-
-
-def _offer_at(offer: dict[str, str]) -> datetime | None:
-    return _when(offer.get("agenda_date", ""))
-
-
-def _natural_choice(text: str, offers: dict[str, dict[str, str]]) -> str | None:
-    """L'offerta indicata a parole: "la seconda", "quella di mercoledì", "alle 10", "il 17
-    novembre". Solo se la frase indica UNA offerta e non chiede altre date; altrimenti None (e
-    il CUP chiede quale, invece di indovinare)."""
-
-    lowered = _norm(text)
-    if not offers or _WANTS_MORE.search(lowered):
-        return None
-    slots = [oid for oid, offer in offers.items() if not offer.get("waiting_list")]
-    waiting = [oid for oid, offer in offers.items() if offer.get("waiting_list")]
-    if not slots:
-        # Solo la lista d'attesa sul tavolo: un sì a parole la sceglie.
-        return waiting[-1] if waiting and _choice_words(lowered) else None
-    latest = slots[-_MAX_OFFERS:]
-    picked: set[str] = set(slots)
-    named = ordinal = False
-    for index, pattern in _ORDINALS:
-        if re.search(rf"\b(?:{pattern})\b", lowered):
-            picked &= {latest[index]} if -len(latest) <= index < len(latest) else set()
-            named = ordinal = True
-            break
-    days = {code for code, names in _DAY_WORDS for name in names if len(name) > 3 and name in lowered}
-    if days:
-        picked &= {
-            oid for oid in slots
-            if (at := _offer_at(offers[oid])) is not None and _DAYS[at.weekday()] in days
-        }
-        named = True
-    hour = re.search(r"\b(?:alle|ore|at)\s*(\d{1,2})(?:[:.](\d{2}))?\b|\b(\d{1,2})[:.](\d{2})\b", lowered)
-    if hour:
-        h = int(hour.group(1) or hour.group(3))
-        m = int(hour.group(2) or hour.group(4) or 0)
-        picked &= {
-            oid for oid in slots
-            if (at := _offer_at(offers[oid])) is not None and (at.hour, at.minute) == (h, m)
-        }
-        named = True
-    date = re.search(r"\b(\d{1,2})\s*(?:/\s*(\d{1,2})\b|\s+([a-z]+))", lowered)
-    if date and (date.group(2) or date.group(3) in _MONTH_NUM):
-        day = int(date.group(1))
-        month = int(date.group(2)) if date.group(2) else _MONTH_NUM[date.group(3)]
-        picked &= {
-            oid for oid in slots
-            if (at := _offer_at(offers[oid])) is not None and (at.day, at.month) == (day, month)
-        }
-        named = True
-    if not named or len(picked) != 1:
-        return None
-    if not (ordinal or _choice_words(lowered) or re.search(r"\b(quell[ao]|that one|the one)\b", lowered)):
-        return None  # "martedì?" da solo è una preferenza, non una scelta
-    return picked.pop()
-
-
-# Una preferenza scritta a parole: "vorrei il martedì", "ideally on Monday", "una dottoressa".
-_PREF_MARK = re.compile(
-    r"\b(preferisc\w*|preferirei|vorrei|se possibile|se si può|se si puo|possibilmente|"
-    r"preferibilmente|tipo|meglio|magari|ideally|prefer\w*|would like|"
-    r"i'd like|rather|if possible|solo (?:il|di)|male doctor|female doctor|medico donna|"
-    r"medico uomo)\b"
-)
-_SINCE_DAY = re.compile(
-    r"\b(?:da|dal|dallo|since|from|scorso|scorsa|last)\s+(?:\w+\s+)?"
-    r"(?:luned\w*|marted\w*|mercoled\w*|gioved\w*|venerd\w*|monday|tuesday|wednesday|thursday|friday)"
+_PII = re.compile(
+    r"[A-Z]{6}\d{2}[A-EHLMPR-T]\d{2}[A-Z]\d{3}[A-Z]"  # codice fiscale
+    r"|[\w.+-]+@[\w-]+\.[\w.]+"  # email
+    r"|\+?\d[\d\s]{8,}\d",  # telefono
+    re.IGNORECASE,
 )
 
 

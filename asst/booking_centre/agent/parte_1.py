@@ -140,6 +140,7 @@ _ASKS_CLINICAL = re.compile(
     re.IGNORECASE,
 )
 
+_NUMBER_N = re.compile(r"(?<![\w-])(N-\d{4}-\d{2}-\d{2}-\d{4,})(?![\w-])")
 _NUMBER_BARE = re.compile(r"\b(prescription_number-[A-Za-z0-9][A-Za-z0-9-]{2,60})")
 _NUMBER_RX = re.compile(r"\b(RX-[A-Za-z0-9][A-Za-z0-9-]{2,60})\b")
 _CONSENT_BARE = re.compile(r"\b(cons-[A-Za-z0-9][A-Za-z0-9_-]{2,80})")
@@ -474,7 +475,7 @@ _TX: dict[str, dict[str, str]] = {
     },
     "rx_not_found": {
         "it": "Non trovo questa ricetta nel registro. Può ricontrollare il numero e riscrivermelo esattamente com'è? Se ha dubbi, il suo medico di base può confermarglielo.",
-        "en": "I could not find this referral in the register. Could you check the number and send it to me again exactly as it is written? If you are unsure, your GP can confirm it.",
+        "en": "I could not find this referral in the register. Could you check the number and send it to me again exactly as it is written? If you are unsure, your GP can check it with you.",
         "es": "No encuentro esta receta en el registro. ¿Puede revisar el número y volver a escribírmelo exactamente como aparece? Si tiene dudas, su médico de cabecera se lo puede confirmar.",
         "fr": "Je ne trouve pas cette ordonnance dans le registre. Pouvez-vous vérifier le numéro et me le renvoyer exactement tel qu'il est écrit ? En cas de doute, votre médecin traitant peut vous le confirmer.",
         "pt": "Não encontro esta receita no registo. Pode verificar o número e voltar a enviá-lo exatamente como está escrito? Em caso de dúvida, o seu médico de família pode confirmá-lo.",
@@ -706,6 +707,117 @@ _TX: dict[str, dict[str, str]] = {
     },
 }
 
+_TX.update({
+    "beyond_intro": {
+        "it": "Nei tempi della ricetta non ci sono posti liberi, né da noi né nelle ASST partner. Per non lasciarla senza appuntamento, ecco le prime date reali disponibili subito dopo:",
+        "en": "Within the time set by the referral there are no free slots, neither with us nor in partner ASSTs. So you are not left without an appointment, here are the first real dates available right after:",
+        "es": "Dentro del plazo de la receta no hay plazas libres, ni con nosotros ni en las ASST colaboradoras. Para no dejarle sin cita, estas son las primeras fechas reales disponibles justo después:",
+        "fr": "Dans le délai de l'ordonnance, il n'y a pas de place libre, ni chez nous ni dans les ASST partenaires. Pour ne pas vous laisser sans rendez-vous, voici les premières dates réelles disponibles juste après :",
+        "pt": "Dentro do prazo da receita não há vagas, nem connosco nem nas ASST parceiras. Para não ficar sem consulta, eis as primeiras datas reais disponíveis logo a seguir:",
+        "de": "Innerhalb der Rezeptfrist gibt es keine freien Termine, weder bei uns noch in Partner-ASST. Damit Sie nicht ohne Termin bleiben, hier die ersten echten Termine direkt danach:",
+        "ro": "În termenul rețetei nu există locuri libere, nici la noi, nici la ASST-urile partenere. Ca să nu rămâneți fără programare, iată primele date reale disponibile imediat după:",
+        "ar": "لا توجد مواعيد شاغرة ضمن مدة الوصفة، لا لدينا ولا لدى ASST الشريكة. حتى لا تبقوا دون موعد، إليكم أول المواعيد الفعلية المتاحة بعد ذلك مباشرة:",
+        "zh": "在处方期限内，我们和合作的ASST都没有空位。为了不让您没有预约，以下是紧接其后最早的实际可预约日期：",
+        "uk": "У межах терміну рецепта вільних місць немає ні в нас, ні в партнерських ASST. Щоб Ви не залишилися без запису, ось перші реальні дати одразу після цього терміну:",
+    },
+    "gp_note": {
+        "it": "Se nel frattempo i disturbi cambiano o peggiorano, ne parli con il suo medico di base.",
+        "en": "If your symptoms change or get worse in the meantime, talk to your GP.",
+        "es": "Si mientras tanto las molestias cambian o empeoran, hable con su médico de cabecera.",
+        "fr": "Si entre-temps vos symptômes changent ou s'aggravent, parlez-en à votre médecin traitant.",
+        "pt": "Se entretanto os sintomas mudarem ou piorarem, fale com o seu médico de família.",
+        "de": "Wenn sich Ihre Beschwerden in der Zwischenzeit ändern oder verschlechtern, sprechen Sie mit Ihrem Hausarzt.",
+        "ro": "Dacă între timp simptomele se schimbă sau se agravează, vorbiți cu medicul de familie.",
+        "ar": "إذا تغيرت الأعراض أو ساءت في هذه الأثناء، فتحدثوا مع طبيب الأسرة.",
+        "zh": "如果在此期间症状有变化或加重，请咨询您的家庭医生。",
+        "uk": "Якщо тим часом симптоми зміняться чи посиляться, зверніться до сімейного лікаря.",
+    },
+    "none_at_all": {
+        "it": "Al momento non trovo posti liberi per la sua {label}, né da noi né nelle ASST partner. Continuo a cercare: mi scriva quando vuole e ricontrollo subito.",
+        "en": "Right now I cannot find free slots for your {label}, neither with us nor in partner ASSTs. I keep looking: write to me whenever you like and I will check again straight away.",
+        "es": "Ahora mismo no encuentro plazas libres para su {label}, ni con nosotros ni en las ASST colaboradoras. Sigo buscando: escríbame cuando quiera y vuelvo a mirar enseguida.",
+        "fr": "Pour l'instant je ne trouve pas de place libre pour votre {label}, ni chez nous ni dans les ASST partenaires. Je continue à chercher : écrivez-moi quand vous voulez et je revérifie aussitôt.",
+        "pt": "De momento não encontro vagas para a sua {label}, nem connosco nem nas ASST parceiras. Continuo a procurar: escreva-me quando quiser e volto a verificar logo.",
+        "de": "Derzeit finde ich keinen freien Termin für Ihre {label}, weder bei uns noch in Partner-ASST. Ich suche weiter: Schreiben Sie mir jederzeit, dann prüfe ich sofort erneut.",
+        "ro": "Momentan nu găsesc locuri libere pentru {label}, nici la noi, nici la ASST-urile partenere. Continui să caut: scrieți-mi oricând și verific imediat din nou.",
+        "ar": "حاليًا لا أجد مواعيد شاغرة لـ {label}، لا لدينا ولا لدى ASST الشريكة. سأواصل البحث: اكتبوا لي متى شئتم وسأتحقق فورًا من جديد.",
+        "zh": "目前我们和合作的ASST都没有您{label}的空位。我会继续查找：您随时联系我，我会立即重新查询。",
+        "uk": "Наразі я не знаходжу вільних місць для Вашої {label} ні в нас, ні в партнерських ASST. Я продовжую шукати: напишіть мені будь-коли, і я одразу перевірю знову.",
+    },
+    "citizen_cancel": {
+        "it": "Va bene, ho annullato la sua richiesta: il posto torna libero per altri cittadini e non deve fare nient'altro.",
+        "en": "All right, I have withdrawn your request: the slot is free again for other citizens and you do not need to do anything else.",
+        "es": "De acuerdo, he anulado su solicitud: la plaza vuelve a quedar libre para otras personas y no tiene que hacer nada más.",
+        "fr": "Entendu, j'ai annulé votre demande : la place redevient libre pour d'autres personnes et vous n'avez rien d'autre à faire.",
+        "pt": "Está bem, anulei o seu pedido: a vaga fica livre para outras pessoas e não precisa de fazer mais nada.",
+        "de": "In Ordnung, ich habe Ihre Anfrage zurückgezogen: Der Platz ist wieder frei für andere und Sie müssen nichts weiter tun.",
+        "ro": "Bine, am anulat cererea: locul devine din nou liber pentru alte persoane și nu trebuie să faceți nimic altceva.",
+        "ar": "حسنًا، لقد ألغيت طلبكم: أصبح الموعد متاحًا لأشخاص آخرين ولا تحتاجون لفعل أي شيء آخر.",
+        "zh": "好的，我已撤销您的申请：该位置将释放给其他市民，您无需再做任何事。",
+        "uk": "Гаразд, я скасував Ваш запит: місце знову вільне для інших, і Вам більше нічого не потрібно робити.",
+    },
+    "citizen_cancel_more": {
+        "it": "Se le serve comunque la visita, qui sotto trova altre date: basta indicarmi quella che preferisce. Altrimenti può ignorare questo messaggio.",
+        "en": "If you still need the visit, you will find other dates below: just tell me which one you prefer. Otherwise you can ignore this message.",
+        "es": "Si aun así necesita la visita, abajo tiene otras fechas: solo dígame cuál prefiere. Si no, puede ignorar este mensaje.",
+        "fr": "Si vous avez quand même besoin de la consultation, vous trouverez d'autres dates ci-dessous : indiquez-moi simplement celle que vous préférez. Sinon, vous pouvez ignorer ce message.",
+        "pt": "Se ainda precisar da consulta, encontra outras datas abaixo: basta indicar-me a que prefere. Caso contrário, pode ignorar esta mensagem.",
+        "de": "Wenn Sie den Termin trotzdem brauchen, finden Sie unten andere Daten: Sagen Sie mir einfach, welches Sie bevorzugen. Andernfalls können Sie diese Nachricht ignorieren.",
+        "ro": "Dacă totuși aveți nevoie de vizită, mai jos găsiți alte date: spuneți-mi doar care vă convine. Altfel, puteți ignora acest mesaj.",
+        "ar": "إذا كنتم ما زلتم بحاجة إلى الزيارة، تجدون أدناه مواعيد أخرى: يكفي أن تخبروني بما تفضلون. وإلا يمكنكم تجاهل هذه الرسالة.",
+        "zh": "如果您仍需就诊，下面有其他日期：告诉我您选哪一个即可。否则可以忽略本消息。",
+        "uk": "Якщо візит Вам усе ж потрібен, нижче є інші дати: просто скажіть, яка зручніша. Інакше можете проігнорувати це повідомлення.",
+    },
+    "wl_left": {
+        "it": "Va bene, ho tolto la sua richiesta dalla lista d'attesa. Se in futuro le servirà, mi scriva e la reinserisco subito.",
+        "en": "All right, I have removed your request from the waiting list. If you need it in the future, write to me and I will add it back straight away.",
+        "es": "De acuerdo, he retirado su solicitud de la lista de espera. Si en el futuro la necesita, escríbame y la vuelvo a incluir enseguida.",
+        "fr": "Entendu, j'ai retiré votre demande de la liste d'attente. Si vous en avez besoin plus tard, écrivez-moi et je la réinscris aussitôt.",
+        "pt": "Está bem, retirei o seu pedido da lista de espera. Se precisar no futuro, escreva-me e volto a inscrevê-lo logo.",
+        "de": "In Ordnung, ich habe Ihre Anfrage von der Warteliste genommen. Wenn Sie sie später brauchen, schreiben Sie mir, dann setze ich Sie sofort wieder darauf.",
+        "ro": "Bine, am scos cererea de pe lista de așteptare. Dacă veți avea nevoie pe viitor, scrieți-mi și o reînscriu imediat.",
+        "ar": "حسنًا، أزلت طلبكم من قائمة الانتظار. إذا احتجتم إليه مستقبلًا فاكتبوا لي وسأعيد إدراجه فورًا.",
+        "zh": "好的，我已将您的申请从候补名单中移除。以后如有需要，联系我即可马上重新登记。",
+        "uk": "Гаразд, я прибрав Ваш запит зі списку очікування. Якщо знадобиться в майбутньому, напишіть мені, і я одразу додам його знову.",
+    },
+    "access_ok": {
+        "it": "Accessibilità: dal registro la struttura risulta accessibile in carrozzina.",
+        "en": "Accessibility: according to the register, the facility is wheelchair accessible.",
+        "es": "Accesibilidad: según el registro, el centro es accesible en silla de ruedas.",
+        "fr": "Accessibilité : d'après le registre, l'établissement est accessible en fauteuil roulant.",
+        "pt": "Acessibilidade: segundo o registo, a unidade é acessível em cadeira de rodas.",
+        "de": "Barrierefreiheit: Laut Register ist die Einrichtung rollstuhlgerecht.",
+        "ro": "Accesibilitate: conform registrului, unitatea este accesibilă cu scaun cu rotile.",
+        "ar": "إمكانية الوصول: وفق السجل، المنشأة مهيأة للكراسي المتحركة.",
+        "zh": "无障碍：根据登记信息，该机构可供轮椅通行。",
+        "uk": "Доступність: за реєстром заклад доступний для крісел колісних.",
+    },
+    "access_unknown": {
+        "it": "Accessibilità: il registro non indica l'accesso in carrozzina per questa struttura; le consiglio di segnalarlo alla struttura al check-in, così possono organizzarsi.",
+        "en": "Accessibility: the register does not list wheelchair access for this facility; I suggest you mention it to the facility at check-in so they can prepare.",
+        "es": "Accesibilidad: el registro no indica acceso en silla de ruedas para este centro; le aconsejo comunicarlo en el check-in para que puedan organizarse.",
+        "fr": "Accessibilité : le registre n'indique pas d'accès en fauteuil roulant pour cet établissement ; je vous conseille de le signaler à l'enregistrement pour qu'ils puissent s'organiser.",
+        "pt": "Acessibilidade: o registo não indica acesso em cadeira de rodas para esta unidade; aconselho a referi-lo no check-in para que se possam organizar.",
+        "de": "Barrierefreiheit: Das Register nennt für diese Einrichtung keinen rollstuhlgerechten Zugang; sagen Sie es bitte bei der Anmeldung, damit man sich vorbereiten kann.",
+        "ro": "Accesibilitate: registrul nu indică acces cu scaun cu rotile pentru această unitate; vă recomand să semnalați la check-in, ca să se poată organiza.",
+        "ar": "إمكانية الوصول: لا يذكر السجل إمكانية دخول الكراسي المتحركة لهذه المنشأة؛ أنصحكم بإبلاغ المنشأة عند تسجيل الحضور ليستعدوا.",
+        "zh": "无障碍：登记信息未注明该机构可供轮椅通行；建议您签到时告知工作人员，以便他们提前安排。",
+        "uk": "Доступність: реєстр не вказує доступу для крісел колісних у цьому закладі; раджу повідомити про це під час реєстрації, щоб там підготувалися.",
+    },
+    "distance": {
+        "it": "Distanza: circa {km} km dal centro del suo Municipio. Con i mezzi pubblici (metro, tram e bus ATM) è il modo più comodo e sostenibile per arrivarci.",
+        "en": "Distance: about {km} km from the centre of your Municipio. Public transport (ATM metro, tram and bus) is the most convenient and sustainable way to get there.",
+        "es": "Distancia: unos {km} km del centro de su Municipio. El transporte público (metro, tranvía y autobús ATM) es la forma más cómoda y sostenible de llegar.",
+        "fr": "Distance : environ {km} km du centre de votre Municipio. Les transports publics (métro, tram et bus ATM) sont le moyen le plus pratique et le plus durable d'y aller.",
+        "pt": "Distância: cerca de {km} km do centro do seu Municipio. Os transportes públicos (metro, elétrico e autocarro ATM) são a forma mais cómoda e sustentável de lá chegar.",
+        "de": "Entfernung: etwa {km} km vom Zentrum Ihres Municipio. Öffentliche Verkehrsmittel (ATM-U-Bahn, Tram und Bus) sind der bequemste und nachhaltigste Weg.",
+        "ro": "Distanță: aproximativ {km} km de centrul Municipiului dumneavoastră. Transportul public (metrou, tramvai și autobuz ATM) este cel mai comod și sustenabil mod de a ajunge.",
+        "ar": "المسافة: حوالي {km} كم من مركز البلدية (Municipio) التي تسكنون فيها. المواصلات العامة (مترو وترام وحافلات ATM) هي الطريقة الأريح والأكثر استدامة للوصول.",
+        "zh": "距离：距您所在区（Municipio）中心约{km}公里。乘坐ATM地铁、有轨电车和公交是最方便、最环保的出行方式。",
+        "uk": "Відстань: близько {km} км від центру Вашого Municipio. Громадський транспорт (метро, трамвай і автобус ATM) — найзручніший і найекологічніший спосіб дістатися.",
+    },
+})
+
 _WEEKDAYS: dict[str, tuple[str, ...]] = {
     "it": ("lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"),
     "en": ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"),
@@ -784,136 +896,5 @@ def _detect_lang(text: str) -> str | None:
     if best is None or italian >= score:
         return None
     return best
-
-
-def _lang_code(raw: str) -> str:
-    code = raw.strip().lower().replace("_", "-").split("-")[0]
-    aliases = {"ua": "uk", "cn": "zh", "ar": "ar", "eng": "en", "ita": "it", "esp": "es", "spa": "es", "fra": "fr", "por": "pt", "deu": "de", "ger": "de", "rum": "ro", "ron": "ro"}
-    return aliases.get(code, code)
-
-
-def tr(key: str, lang: str, **kwargs: object) -> str:
-    """Una frase del catalogo nella lingua del cittadino (ripiego: inglese, poi italiano)."""
-
-    table = _TX.get(key, {})
-    template = table.get(lang) or table.get("en") or table.get("it") or key
-    try:
-        return template.format(**kwargs)
-    except (KeyError, IndexError, ValueError):
-        return template
-
-
-# --- ingresso ------------------------------------------------------------------------------------
-
-
-async def main(need: Need, city: City) -> None:
-    message = city.inbound
-    if message is None:
-        return
-    if message.sender == city.agent_id:
-        return
-    text = message.text or need.summary or ""
-
-    # Emergenza dichiarata dall'harness o dal need: ci si ferma e si escala.
-    body = understood(message).body if message.type == "chat" else message.body
-    if (need.is_emergency or body.get("is_emergency") is True) and message.sender != LEDGER:
-        await _say(city, message.sender, _escalation_text(_lang_of_text(text)))
-        return
-
-    # Rifiuto solo una vera domanda clinica (diagnosi, dose) che non porta nulla da prenotare.
-    # Una frase come "il medico mi ha fatto la diagnosi, ecco la ricetta" è un'affermazione:
-    # si prenota e si ricorda con garbo che sul piano clinico decide il medico.
-    if (
-        not message.sender.startswith("agent:")
-        and message.sender != LEDGER
-        and clinical(text)
-        and _ASKS_CLINICAL.search(text)
-        and not _has_booking_tokens(text)
-    ):
-        raise OutOfScope()
-
-    try:
-        chat = await city.history(need_id=message.need_id)
-    except CapError:
-        chat = []
-    if all(row.msg_id != message.msg_id for row in chat):
-        chat = [*chat, message]
-
-    street = _own_street(city)
-    if street and _asks_address(message):
-        await _say(city, message.sender, f"address={street}")
-        return
-    try:
-        await _desk(city, message, chat)
-    except (OutOfScope, asyncio.CancelledError):
-        raise
-    except Exception:  # noqa: BLE001 - un errore di logica non deve lasciare il caso fermo
-        _LOG.exception("booking.turn.error", extra={"need_id": (message.need_id or "")[:48]})
-
-
-# --- lettura del testo ----------------------------------------------------------------------------
-
-
-def words(text: str) -> set[str]:
-    return {token.strip(".,;:!?()\"'«»").lower() for token in text.split() if token.strip()}
-
-
-def first_word(text: str) -> str:
-    parts = text.split()
-    return parts[0].strip(".,;:!?()\"'").lower() if parts else ""
-
-
-def line_heads(text: str) -> set[str]:
-    """Il primo token di ogni riga: è lì che scriviamo (e cerchiamo) la parola dell'atto."""
-
-    return {first_word(line) for line in text.splitlines() if line.strip()}
-
-
-def fields_of(text: str) -> dict[str, str]:
-    """Primo valore di ogni ``chiave=valore`` nel testo."""
-
-    found: dict[str, str] = {}
-    # Separo solo sugli spazi: "days=lun,mar,mer" resta una lista; "a=1, b=2" funziona perché
-    # la virgola finale viene tolta dal valore.
-    for token in text.replace(";", " ").split():
-        key, eq, value = token.partition("=")
-        key = key.strip("([{\"'«")
-        if not eq or not key or not value:
-            continue
-        value = value.strip(".,;:!?)]}\"'»")
-        if key not in found and value:
-            found[key] = value
-    return found
-
-
-def _norm(text: str) -> str:
-    return " ".join(text.lower().replace("’", "'").split())
-
-
-def _has_booking_tokens(text: str) -> bool:
-    fields = fields_of(text)
-    if any(key in fields for key in ("prescription_number", "offer_id", "slot_id", "consent_ref")):
-        return True
-    return bool(_NUMBER_BARE.search(text) or _NUMBER_RX.search(text))
-
-
-def _number_in(text: str) -> str | None:
-    """Il numero di ricetta in una frase: come token, oppure scritto così com'è."""
-
-    number = fields_of(text).get("prescription_number")
-    if number:
-        return number
-    for pattern in (_NUMBER_BARE, _NUMBER_RX):
-        hit = pattern.search(text)
-        if hit:
-            return hit.group(1).rstrip(".,;:!?-")
-    return None
-
-
-def _red_flag(text: str) -> bool:
-    lowered = _norm(text)
-    if fields_of(text).get("is_emergency", "").lower() == "true":
-        return True
-    return any(flag in lowered for flag in _RED_FLAGS)
 
 

@@ -77,3 +77,30 @@ ogni volta da `city.history(need_id=…)`.
 - **Medico che parla la lingua**: si filtra solo sulla lingua *dichiarata* (`lang=`), perché è quella che il cittadino verifica sul registro. Nella nostra ASST h1, s1 e c1 parlano inglese, h3 portoghese. Se nessun medico parla la lingua, l'agente va alle ASST partner con il consenso `cross_asst`, poi alla lista d'attesa.
 - **Capisce anche in altre lingue**: giorni preferiti, genere del medico, scelta di un'opzione, "nessuna va bene", segnali d'allarme (es. "dolor en el pecho", "胸痛", "біль у грудях") e tentativi di injection.
 - **Correzione**: le "ASST partner" escludono sempre le strutture della nostra squadra.
+
+## Livello 3: bisogni in linguaggio naturale
+
+- **Numero di ricetta in forma libera**: anche "la ricetta è N-2026-11-02-890907000042", che diventa `prescription_number-N-…` come lo scrive il medico di base. Se non c'è un formato noto ma il testo contiene cifre, il modello della città estrae il numero; lo accetto solo se compare davvero nel testo.
+- **Preferenze nel primo messaggio**, se c'è un segnale ("preferisco", "vorrei", "solo", "non posso", "tranne"…, in 10 lingue). Ad esempio:
+  - giorni ("il martedì") ed esclusioni ("non posso il lunedì", "tutti tranne venerdì");
+  - mattina o pomeriggio;
+  - genere del medico;
+  - lingua ("parlo solo portoghese" → medico h3).
+  "Ho mal di schiena *da* martedì" non è una preferenza.
+- **Alternativa rilassata a gradi**: prima rinuncio alla fascia oraria, poi a giorni e genere, e lo dico sempre in modo trasparente.
+- **Scelta a parole**: "la seconda", "opzione 2", "quella di martedì alle 10:30". La scelta vale solo se la frase indica una sola offerta; altrimenti il modello della città può scegliere solo tra gli `offer_id` proposti, e se non è chiaro chiedo quale.
+- **Lingua del medico**: si usa la lingua dichiarata, quella chiesta a parole o quella in cui il cittadino scrive. Se nessun medico della nostra ASST la parla, si passa alle ASST partner con il consenso, poi alla lista d'attesa.
+
+## Aggiornamento del 21/11: regole del team, privacy, mobilità, accessibilità
+
+- **Niente parole d'atto nella prosa inglese**: "prescription" → "referral", "consent" → "permission", niente "offer" o "confirm" nelle frasi. Anche il messaggio alle ASST partner non usa più la parola "confirm" nella prosa.
+- **Le priorità U, B e D non vanno mai in lista d'attesa.** L'ordine è: prima la nostra ASST, poi le preferenze rilassate, poi le partner con `cross_asst`, poi i primi posti reali subito dopo la scadenza, detto in modo trasparente e con l'invito a sentire il medico se i sintomi cambiano. `waiting_list=true` vale solo per la priorità P.
+- **Annullamento del cittadino** (`cancel` o "annullo", "disdico", "non mi serve più", in 10 lingue). Mai "Fatto" né "grazie per la scelta". Il booking:
+  1. libera il posto presso la struttura con `cancel … reason=citizen_cancelled`;
+  2. conferma con garbo l'annullamento;
+  3. propone subito altre date reali, senza lo slot annullato;
+  4. ignora un'eventuale ricevuta che arriva dopo per quel posto.
+  Una lista d'attesa annullata viene tolta, e il cittadino può chiedere di essere rimesso in lista.
+- **Privacy verso gli altri agenti**: ogni messaggio a un agente passa da `_minimise()`, che toglie codice fiscale, indirizzo, età, disabilità, email e telefono. Restano solo i dati necessari alla prenotazione, e verso le partner solo dopo il consenso.
+- **Mobilità**: la ricevuta indica la distanza approssimativa dal centro del Municipio del cittadino, letto dal token `area.district` (non chiediamo l'indirizzo), e suggerisce metro, tram e bus ATM. Niente API esterne, perché il regolamento ammette solo `city_sdk`.
+- **Accessibilità**: solo se è il cittadino a dirlo ("sono in carrozzina", "mobilità ridotta"…), il booking mette prima le strutture accessibili e lo scrive nella ricevuta usando il dato del registro. Se il registro non lo indica, consiglia di segnalarlo al check-in. Il dato sulla disabilità non viene mai passato alle strutture.

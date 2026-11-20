@@ -7,7 +7,7 @@ import logging
 import re
 from collections import OrderedDict
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from city_sdk.city import LEDGER, CapError, City, Message, Need, clinical, understood
 
@@ -40,6 +40,76 @@ _PULL_PAUSE = 0.25
 
 
 _SENT_NEEDS = 4096
+
+
+_MESSAGES = {
+    'it': {
+        'urgent': 'La tua segnalazione richiede assistenza urgente.',
+        'clinical': 'Per una valutazione clinica puoi rivolgerti a un professionista sanitario. Qui posso aiutarti con l’appuntamento.',
+        'not_booked': 'Non ho potuto confermare questo orario. La prenotazione non è stata completata.',
+        'partial': 'Non sono riuscito a verificare tutte le disponibilità. Nessun appuntamento è stato confermato.',
+        'offer': 'Posso proporti una visita al consultorio il {date} alle {time}. Per accedere non serve una ricetta. Conferma se l’orario ti va bene.',
+        'unavailable': 'Al momento non ho trovato un appuntamento al consultorio che rispetti le condizioni che hai indicato.',
+        'receipt': 'Il tuo appuntamento al consultorio è confermato. Conserva questa ricevuta.',
+        'cancel': 'L’orario scelto non è più disponibile. Verifico se c’è un’alternativa.',
+        'checkin': 'Il tuo arrivo al consultorio è stato registrato.',
+    },
+    'en': {
+        'urgent': 'Your message indicates that you need urgent assistance.',
+        'clinical': 'A healthcare professional can assess your concerns. I can help you arrange an appointment.',
+        'not_booked': "I couldn't confirm this time. Your appointment has not been booked.",
+        'partial': "I couldn't check all available times. No appointment has been confirmed.",
+        'offer': "I can offer you an appointment at the family health clinic on {date} at {time}. You don't need a referral. Please confirm if this time works for you.",
+        'unavailable': "I haven't found an appointment at the family health clinic that meets your requirements.",
+        'receipt': 'Your appointment at the family health clinic is confirmed. Please keep this receipt.',
+        'cancel': "The time you chose is no longer available. I'll check for another option.",
+        'checkin': 'Your arrival at the family health clinic has been recorded.',
+    },
+    'de': {
+        'urgent': 'Ihre Nachricht weist darauf hin, dass Sie dringend Hilfe benötigen.',
+        'clinical': 'Für eine medizinische Einschätzung wenden Sie sich bitte an eine medizinische Fachkraft. Ich kann Ihnen bei der Terminvereinbarung helfen.',
+        'not_booked': 'Ich konnte diesen Termin nicht bestätigen. Die Buchung wurde nicht abgeschlossen.',
+        'partial': 'Ich konnte nicht alle verfügbaren Termine prüfen. Es wurde kein Termin bestätigt.',
+        'offer': 'Ich kann Ihnen einen Termin in der Familienberatungsstelle am {date} um {time} Uhr anbieten. Eine Überweisung ist nicht nötig. Bitte bestätigen Sie, wenn der Termin für Sie passt.',
+        'unavailable': 'Ich habe aktuell keinen Termin in der Familienberatungsstelle gefunden, der zu Ihren Angaben passt.',
+        'receipt': 'Ihr Termin in der Familienberatungsstelle ist bestätigt. Bitte bewahren Sie diesen Beleg auf.',
+        'cancel': 'Der gewählte Termin ist nicht mehr verfügbar. Ich prüfe, ob es eine Alternative gibt.',
+        'checkin': 'Ihre Ankunft in der Familienberatungsstelle wurde erfasst.',
+    },
+    'fr': {
+        'urgent': 'Votre message indique que vous avez besoin d’une aide urgente.',
+        'clinical': 'Un professionnel de santé peut évaluer votre situation. Je peux vous aider à prendre rendez-vous.',
+        'not_booked': 'Je n’ai pas pu confirmer ce créneau. Le rendez-vous n’a pas été réservé.',
+        'partial': 'Je n’ai pas pu vérifier tous les créneaux disponibles. Aucun rendez-vous n’a été confirmé.',
+        'offer': 'Je peux vous proposer un rendez-vous au centre de santé familiale le {date} à {time}. Vous pouvez y accéder sans ordonnance. Confirmez si cet horaire vous convient.',
+        'unavailable': 'Je n’ai pas trouvé de rendez-vous au centre de santé familiale qui corresponde à vos besoins.',
+        'receipt': 'Votre rendez-vous au centre de santé familiale est confirmé. Conservez ce justificatif.',
+        'cancel': 'Le créneau choisi n’est plus disponible. Je vérifie s’il existe une autre possibilité.',
+        'checkin': 'Votre arrivée au centre de santé familiale a été enregistrée.',
+    },
+    'es': {
+        'urgent': 'Tu mensaje indica que necesitas asistencia urgente.',
+        'clinical': 'Un profesional sanitario puede valorar tu situación. Yo puedo ayudarte a pedir una cita.',
+        'not_booked': 'No he podido confirmar este horario. La cita no se ha reservado.',
+        'partial': 'No he podido comprobar todos los horarios disponibles. No se ha confirmado ninguna cita.',
+        'offer': 'Puedo ofrecerte una cita en el centro de salud familiar el {date} a las {time}. No necesitas una derivación. Confirma si te viene bien.',
+        'unavailable': 'No he encontrado una cita en el centro de salud familiar que se ajuste a tus necesidades.',
+        'receipt': 'Tu cita en el centro de salud familiar está confirmada. Guarda este justificante.',
+        'cancel': 'El horario que elegiste ya no está disponible. Voy a comprobar si hay otra opción.',
+        'checkin': 'Se ha registrado tu llegada al centro de salud familiar.',
+    },
+    'pt': {
+        'urgent': 'A sua mensagem indica que precisa de assistência urgente.',
+        'clinical': 'Um profissional de saúde pode avaliar a sua situação. Posso ajudar a marcar uma consulta.',
+        'not_booked': 'Não consegui confirmar este horário. A consulta não ficou marcada.',
+        'partial': 'Não consegui verificar todos os horários disponíveis. Nenhuma consulta foi confirmada.',
+        'offer': 'Posso propor uma consulta no centro de saúde familiar no dia {date}, às {time}. Não precisa de encaminhamento. Confirme se o horário lhe convém.',
+        'unavailable': 'Não encontrei uma consulta no centro de saúde familiar que cumpra as condições que indicou.',
+        'receipt': 'A sua consulta no centro de saúde familiar está confirmada. Guarde este comprovativo.',
+        'cancel': 'O horário que escolheu já não está disponível. Vou verificar se existe uma alternativa.',
+        'checkin': 'A sua chegada ao centro de saúde familiar foi registada.',
+    },
+}
 
 
 async def main(need: Need, city: City) -> None:
@@ -197,9 +267,7 @@ def _when(value: str) -> datetime | None:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _citizen(chat: list[Message]) -> str | None:
@@ -273,6 +341,7 @@ async def _await_line(
     token: str,
     *,
     op: str,
+    alternate_tokens: tuple[str, ...] = (),
 ) -> tuple[Message, list[Message]] | None:
     """The ledger line for ``token``, or a refusal of ``op`` that was not already in ``chat``."""
 
@@ -283,7 +352,7 @@ async def _await_line(
             fresh = await city.history(need_id=need_id)
         except CapError:
             fresh = chat
-        hit = _latest(fresh, head, token)
+        hit = next((row for candidate in (token, *alternate_tokens) if (row := _latest(fresh, head, candidate)) is not None), None)
         if hit is not None:
             return hit, fresh
         for row in fresh:
@@ -334,19 +403,25 @@ def fitting(
     chosen: list[tuple[datetime, dict[str, str]]] = []
     for line in lines:
         slot = fields_of(line)
-        slot_id = slot.get("slot_id")
-        doctor = slot.get("doctor_id")
-        at = _when(slot.get("at", ""))
+        slot_id = slot.get("slot_id") or slot.get("slot")
+        doctor = slot.get("doctor_id") or slot.get("doctor")
+        date = slot.get("at") or slot.get("agenda_date") or slot.get("start")
+        if not date and slot.get("date") and slot.get("time"):
+            date = f"{slot['date']}T{slot['time']}"
+        at = _when(date or "") if date and "T" in date else None
         if not slot_id or not doctor or at is None:
             continue
         if procedure and slot.get("procedure") not in (None, procedure):
             continue
-        if facility and slot.get("facility") != facility:
+        if facility and slot.get("facility") not in {facility, "family_counseling"}:
             continue
         free = slot.get("free")
         if free is not None and free.isdigit() and int(free) <= 0:
             continue
-        reserve = slot.get("urgent_reserve", "").lower() == "true"
+        reserve = any(
+            slot.get(key, "").lower() in {"true", "yes", "u", "urgent", "urgente", "1"}
+            for key in ("urgent_reserve", "reserve", "reserved", "riserva")
+        )
         if reserve and priority != "U":
             continue
         if not earliest < at or (horizon is not None and at >= horizon):
@@ -356,11 +431,18 @@ def fitting(
         spec = _DOCTORS.get(doctor.rsplit("-", 1)[-1])
         if spec is None:
             continue
-        day = slot.get("day", "")
-        if (day and day not in spec[2]) or (days and day not in days):
+        day = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[at.weekday()]
+        if day not in spec[2] or (days and day not in days):
             continue
         if gender and spec[1] != gender:
             continue
+        slot.update(
+            slot_id=slot_id,
+            doctor_id=doctor,
+            at=at.isoformat(),
+            day=day,
+            procedure=slot.get("procedure") or procedure or "CONS-GIN",
+        )
         chosen.append((at, slot))
     chosen.sort(key=lambda item: (item[0], item[1].get("slot_id", "")))
     return [slot for _, slot in chosen]
@@ -544,15 +626,21 @@ def _withdrawn(chat: list[Message], agent: str) -> set[str]:
 
 
 def _lang(chat: list[Message]) -> str:
-    """Il token lang= vince sempre; senza, la lingua si riconosce dalle parole (livello 3)."""
+    """Il token lang= (nel testo o nei campi del messaggio) vince sempre; senza, la lingua si
+    riconosce dalle parole (livello 3)."""
 
-    for row in chat:
+    for row in reversed(chat):
         if row.sender.startswith("citizen:"):
-            lang = fields_of(row.text).get("lang", "")
-            if lang:
-                return lang
+            lang = fields_of(row.text).get("lang") or row.body.get("lang")
+            if isinstance(lang, str) and lang.strip():
+                return re.split(r"[-_]", lang.strip().lower(), maxsplit=1)[0]
     texts = " ".join(row.text for row in chat if row.sender.startswith("citizen:"))
     return _detect_lang(texts) or "it"
+
+
+def _message(chat: list[Message], key: str, **values: str) -> str:
+    translations = _MESSAGES.get(_lang(chat), _MESSAGES["it"])
+    return translations[key].format(**values)
 
 
 def _gender(chat: list[Message]) -> str | None:
@@ -794,109 +882,5 @@ def _tone(chat: list[Message]) -> str:
 def _red_flag(text: str) -> bool:
     lowered = " ".join(text.lower().replace("’", "'").split())
     return any(flag in lowered for flag in _RED_FLAGS)
-
-
-def _escalation_text(tone: str) -> str:
-    if tone == "en":
-        return (
-            "escalate.emergency reason=red_flag\n"
-            "What you describe needs to be looked at straight away, before any appointment. "
-            "Please call 112 now or go to the nearest emergency department. If someone is with "
-            "you, ask them to stay close. The emergency team is the right help right now."
-        )
-    return (
-        "escalate.emergency reason=red_flag\n"
-        "Quello che mi descrive va valutato subito, prima di qualsiasi appuntamento. Chiami ora "
-        "il 112 oppure si rechi al pronto soccorso più vicino. Se c'è qualcuno con lei, gli "
-        "chieda di restarle accanto. I soccorritori sono l'aiuto giusto in questo momento."
-    )
-
-
-def _when_text(value: str, tone: str) -> str:
-    at = _when(value)
-    if at is None:
-        return value
-    day = _DAY_KEYS[at.weekday()]
-    if tone == "en":
-        return f"{_DAY_EN.get(day, day)} {at.day} {at.strftime('%B')} at {at:%H:%M}"
-    return f"{_DAY_IT.get(day, day)} {at.day} {_MONTH_IT[at.month - 1]} alle ore {at:%H:%M}"
-
-
-def _bare_consent(text: str) -> str | None:
-    hit = _CONSENT_BARE.search(text)
-    return hit.group(1) if hit else None
-
-
-def _our_offers(chat: list[Message], agent: str) -> dict[str, dict[str, str]]:
-    citizen = _citizen(chat)
-    return {
-        line["offer_id"]: line
-        for line in _offer_lines(chat, agent, citizen)
-        if line.get("offer_id")
-    }
-
-
-async def _citizen_declined(
-    city: City, message: Message, case: list[Message], offers: dict[str, dict[str, str]]
-) -> None:
-    """Rifiuto di un'offerta. Se ne restano altre aspetto; quando sono rifiutate tutte cerco
-    altri orari (quelli rifiutati restano esclusi) o propongo la lista d'attesa."""
-
-    fresh = await city.history(need_id=message.need_id)
-    if all(row.msg_id != message.msg_id for row in fresh):
-        fresh = [*fresh, message]
-    gone = _withdrawn(fresh, city.agent_id)
-    still_open = [oid for oid, offer in offers.items() if offer.get("slot_id") and offer["slot_id"] not in gone]
-    if still_open:
-        return
-    await _advance(city, message, fresh, fixed="CONS-GIN", replacing=True)
-
-
-def _pending_choice(
-    chat: list[Message], agent: str, citizen: str, offers: dict[str, dict[str, str]]
-) -> str | None:
-    """L'offerta per cui abbiamo chiesto il consenso, o l'ultima nominata dal cittadino."""
-
-    chosen: str | None = None
-    for row in chat:
-        if row.sender == agent and row.recipient == citizen and first_word(row.text) == "consent":
-            offer_id = fields_of(row.text).get("offer_id")
-            if offer_id in offers:
-                chosen = offer_id
-        elif row.sender == citizen and "cancel" not in words(row.text):
-            offer_id = fields_of(row.text).get("offer_id")
-            if offer_id in offers:
-                chosen = offer_id
-    return chosen
-
-
-def _awaiting_consent(chat: list[Message], agent: str, citizen: str) -> bool:
-    """Abbiamo chiesto il consenso e non abbiamo ancora mandato l'hold."""
-
-    asked = None
-    for index, row in enumerate(chat):
-        if row.sender == agent and row.recipient == citizen and first_word(row.text) == "consent":
-            asked = index
-    if asked is None:
-        return False
-    return not any(
-        row.sender == agent and row.recipient == LEDGER and first_word(row.text) == "hold"
-        for row in chat[asked:]
-    )
-
-
-def _requester(chat: list[Message], agent: str, slot: str) -> str:
-    """Il CUP (agente) che ci ha chiesto di prenotare questo slot, se c'è."""
-
-    token = f"slot_id={slot}"
-    for row in chat:
-        if (
-            row.sender.startswith("agent:")
-            and row.sender != agent
-            and "confirm" in words(row.text)
-            and token in row.text.split()
-        ):
-            return row.sender
-    return ""
 
 
