@@ -68,3 +68,12 @@ ogni volta da `city.history(need_id=…)`.
 - **Collaborazione e risposta rapida (+1 nella review).** Quando una struttura manda una ricevuta, un annullamento o un'offerta, il booking le risponde subito con una riga di ringraziamento, senza parole d'atto. Se un'altra ASST ci chiede posti (`need.request`), risponde con gli slot liberi, indica la nostra struttura con il suo id agente e non usa dati personali. Se non ci sono posti, risponde con un `cancel reason=no_availability` cortese.
 - **Mai fermi per un errore.** Un'eccezione nel brain viene registrata nei log e non lascia il caso senza risposta.
 - **Cosa premia la review (dai verdetti in console).** "Dominio" +1 solo se il messaggio riconosce la persona e dà un passo successivo chiaro: un `escalate.emergency` senza testo ha preso 0. "Proattività" +1 per lavoro utile non richiesto. "Collaborazione" +1 se si chiama un altro agente per migliorare il servizio.
+
+## Lingue (aggiornamento del 20/11)
+
+- **10 lingue in catalogo**: italiano, inglese, spagnolo, francese, portoghese, tedesco, rumeno, arabo, cinese e ucraino. Sono le lingue delle comunità straniere più numerose a Milano. Tutti i testi per il cittadino stanno nel catalogo `_TX` e si usano con `tr(chiave, lingua)`, sempre con il registro formale (Lei, usted, vous, Sie, dumneavoastră, 您, Ви).
+- **Scelta della lingua**: vale il token `lang=` del cittadino. Se manca, la lingua si riconosce dal testo: dall'alfabeto (arabo, cinese, cirillico) o da parole tipiche, ignorando i token `chiave=valore`. Una lingua non in catalogo riceve l'inglese.
+- **Cosa non si traduce mai**: parole d'atto e token (`offer`, `offer_id=`, `booking.receipt`…), che leggono il cittadino e il giudice. Date e giorni si scrivono nella lingua del cittadino; il token `agenda_day=` resta in inglese.
+- **Medico che parla la lingua**: si filtra solo sulla lingua *dichiarata* (`lang=`), perché è quella che il cittadino verifica sul registro. Nella nostra ASST h1, s1 e c1 parlano inglese, h3 portoghese. Se nessun medico parla la lingua, l'agente va alle ASST partner con il consenso `cross_asst`, poi alla lista d'attesa.
+- **Capisce anche in altre lingue**: giorni preferiti, genere del medico, scelta di un'opzione, "nessuna va bene", segnali d'allarme (es. "dolor en el pecho", "胸痛", "біль у грудях") e tentativi di injection.
+- **Correzione**: le "ASST partner" escludono sempre le strutture della nostra squadra.
