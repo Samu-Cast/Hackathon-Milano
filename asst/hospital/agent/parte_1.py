@@ -570,12 +570,46 @@ async def _serve_partner(city: City, message: Message, chat: list[Message], defa
     procedure = fields.get("procedure") or default
     request_id = fields.get("request_id") or message.need_id or message.msg_id
     priority = (fields.get("priority") or "").upper() or None
-    lang = (fields.get("lang") or "it").lower()
+    lang = (fields.get("lang") or "it").lower().split("-")[0]
+    want_gender = (fields.get("gender_preference") or fields.get("gender") or "").lower()[:1] or None
+    want_days = {part for part in re.split(r"[/,|;+]", (fields.get("days") or "").lower()) if part[:3] in
+                 {"mon", "tue", "wed", "thu", "fri"}} or None
     tag = f"request_id={request_id}"
     if _we(chat, agent, tag, to=message.sender, word="offer") or _we(
         chat, agent, tag, to=message.sender, word="cancel"
     ):
         return
+    # MACH-1 e fast-reply: se la risposta richiede più di qualche secondo (pagine del Ledger),
+    # prima una conferma di ricezione a parole, senza parola dell'atto.
+    async def _late_ack() -> None:
+        await asyncio.sleep(_PARTNER_ACK_AFTER)
+        await _say(city, message.sender, "Ricevuto, verifico la disponibilità sul Ledger e vi rispondo subito.")
+    ack = asyncio.create_task(_late_ack())
+    try:
+        await _serve_partner_slots(city, message, chat, procedure, request_id, priority, lang, want_gender, want_days)
+    finally:
+        ack.cancel()
+
+
+_PARTNER_ACK_AFTER = 4.0
+# Organico comune a tutte le ASST (kit: «gli stessi medici»). h3 parla anche la lingua rara
+# dell'ASST, che non conosciamo con certezza: per h3 non dichiaro la lingua.
+_DOCTOR_LANG = {"h1": "it/en", "h2": "it", "s1": "it/en", "s2": "it", "c1": "it/en"}
+
+
+def _partner_speaks(doctor_id: str, lang: str) -> bool:
+    """Per un'altra ASST dichiaro solo lingue certe: mai h3 per una lingua rara non verificata."""
+
+    spec = _DOCTORS.get(doctor_id.rsplit("-", 1)[-1])
+    return spec is not None and lang in spec[0]
+
+
+async def _serve_partner_slots(
+    city: City, message: Message, chat: list[Message], procedure: str, request_id: str,
+    priority: str | None, lang: str, want_gender: str | None, want_days: set[str] | None,
+) -> None:
+    agent = city.agent_id
+    tag = f"request_id={request_id}"
     if not _has_agenda(chat) and not _exact(chat, agent, "agenda"):
         await _say(city, LEDGER, "agenda")
     if not _asked(chat, agent, procedure, 1):
@@ -591,9 +625,18 @@ async def _serve_partner(city: City, message: Message, chat: list[Message], defa
         if now is None or priority == "P" or _latest_slots(chat) is None:
             break
         earliest = now + _LEAD
-        slots = fitting(
-            _all_slot_lines(chat), now=now, priority=priority, lang=lang, procedure=procedure,
-        )[:3]
+        found = [
+            slot for slot in fitting(
+                _all_slot_lines(chat), now=now, priority=priority, lang=lang, procedure=procedure,
+            )
+            if _partner_speaks(slot["doctor_id"], lang)
+        ]
+        strict = [
+            slot for slot in found
+            if (not want_gender or (_DOCTORS.get(slot["doctor_id"].rsplit("-", 1)[-1]) or ("", "", ""))[1] == want_gender)
+            and (not want_days or slot.get("day", "")[:3] in want_days)
+        ]
+        slots = (strict or found)[:3]
         if slots and not _searching(chat, earliest):
             break
         limit = None if priority == "U" else now + timedelta(days=_DEADLINE_DAYS.get(priority or "", 14) + 2)
@@ -610,8 +653,8 @@ async def _serve_partner(city: City, message: Message, chat: list[Message], defa
     if not slots:
         await _say(
             city, message.sender,
-            f"cancel {tag} procedure={procedure} reason=no_availability "
-            "Al momento non abbiamo posti liberi per questa prestazione nei tempi richiesti. Grazie!",
+            f"cancel reason=no_availability {tag} procedure={procedure}\n"
+            "Al momento non abbiamo posti liberi per questa prestazione nei tempi e nella lingua richiesti. Grazie!",
         )
         return
     lines = []
@@ -622,12 +665,17 @@ async def _serve_partner(city: City, message: Message, chat: list[Message], defa
             f"agenda_date={slot['at']}", f"agenda_day={slot.get('day', '')}",
             f"expiry={slot['at']}", tag,
         ]
+        key = slot["doctor_id"].rsplit("-", 1)[-1]
+        if _DOCTOR_LANG.get(key):
+            parts.append(f"doctor_lang={_DOCTOR_LANG[key]}")
+        if _DOCTORS.get(key):
+            parts.append(f"doctor_gender={_DOCTORS[key][1]}")
         if priority:
             parts.append(f"priority={priority}")
         lines.append(" ".join(part for part in parts if not part.endswith("=")))
     lines.append(
         "Ecco i nostri posti liberi (nessun dato del paziente richiesto finora). Per prenotare "
-        "mandateci confirm con offer_id, slot_id, citizen, consent_ref e prescription_number."
+        "mandateci la conferma con offer_id, slot_id, citizen, consent_ref, cross_asst_consent_ref e prescription_number."
     )
     await _say(city, message.sender, "\n".join(lines))
 

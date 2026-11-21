@@ -451,7 +451,12 @@ async def _on_confirm(
                 parts.append(f"citizen={citizen}")
             if number:
                 parts.append(f"prescription_number={number}")
-            parts.append(f"consent_ref={consent}")
+            cross = fields.get("cross_asst_consent_ref", "")
+            if cross and _valid_id(cross):
+                # MACH-1: hold in un'altra ASST con il consenso cross_asst del cittadino (regola P2).
+                parts += [f"consent_ref={cross}", f"cross_asst_consent_ref={cross}"]
+            else:
+                parts.append(f"consent_ref={consent}")
             if not await _say(city, LEDGER, " ".join(parts)):
                 return
         await _finish_booking(city, message, chat, slot, hold_self=hold_self)
@@ -730,6 +735,8 @@ async def _on_refused(
         # altro slot, consenso. Senza codice resta il motivo generico.
         code = re.search(r"\b([A-Z][A-Z_]{3,})\b", message.text)
         reason = code.group(1) if code else "facility_cancelled"
+        if reason == "CONSENT_MISSING" and target.startswith("agent:"):
+            reason = "rule_p2_no_consent"  # motivo condiviso MACH-1
         await _say(city, target, f"cancel offer_id={offer_id} slot_id={slot} reason={reason}{note}")
     if hold_self:
         await _advance(city, message, chat, fixed="CONS-GIN", replacing=True)
