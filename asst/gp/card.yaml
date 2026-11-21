@@ -1,7 +1,7 @@
 agent_id: agent:dn90g1skkx0f
 team: team:epica
 name: gp
-version: 1.0.6
+version: 1.0.7
 cap_versions:
   - "1.0"
 profiles:
