@@ -141,7 +141,13 @@ async def _handle_turn(need: Need, city: City, message: Message) -> None:
     act = first_word(message.text)
     if citizen:
         interpreted = understood(message)
-        if getattr(need, "is_emergency", False) is True or interpreted.body.get("is_emergency") is True:
+        # Segnale d'allarme anche quando è scritto a parole e mescolato a istruzioni improprie:
+        # prima l'escalation, poi niente altro su questo messaggio.
+        if (
+            getattr(need, "is_emergency", False) is True
+            or interpreted.body.get("is_emergency") is True
+            or _red_flag(message.text or need.summary or "")
+        ):
             if not _we(case, city.agent_id, "reason=red_flag", to=sender, word="escalate.emergency"):
                 await city.say(sender, "escalate.emergency reason=red_flag — " + _message(case, "urgent"))
             return
@@ -210,6 +216,24 @@ def _asks_address(message: Message) -> bool:
 
 def words(text: str) -> set[str]:
     return {token.strip(".,;:!?()\"'").lower() for token in text.split() if token.strip()}
+
+
+# Segnali d'allarme (non una diagnosi: il motivo per fermarsi e indirizzare al 112).
+_RED_FLAGS = (
+    "dolore al petto", "dolore toracico", "non riesco a respirare", "perdita di forza",
+    "svenut", "perso i sensi", "convulsion", "emorragia", "perdo molto sangue", "sanguinamento abbondante",
+    "dolore addominale fortissimo", "dolore fortissimo alla pancia", "violenza", "mi ha picchiat",
+    "ho paura per la mia vita", "voglio farla finita", "farmi del male", "togliermi la vita", "suicid",
+    "chest pain", "can't breathe", "cannot breathe", "fainted", "passed out", "seizure",
+    "heavy bleeding", "severe abdominal pain", "being abused", "kill myself", "hurt myself",
+    "dolor en el pecho", "sangrado abundante", "douleur à la poitrine", "dor no peito",
+    "brustschmerz", "ألم في الصدر", "胸痛", "біль у грудях",
+)
+
+
+def _red_flag(text: str) -> bool:
+    low = " ".join(text.lower().replace("’", "'").split())
+    return any(flag in low for flag in _RED_FLAGS)
 
 
 def _valid_ref(value: object) -> bool:
