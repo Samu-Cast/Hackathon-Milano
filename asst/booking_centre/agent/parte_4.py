@@ -161,7 +161,7 @@ async def _advance(
         and not any(row.sender == citizen for row in chat[asked_at + 1 :])
     ):
         return  # ho chiesto la preferenza che mancava: aspetto la risposta
-    if days is None and gender is None and period is None and not asked_prefs and not (replacing or refresh):
+    if days is None and gender is None and period is None and not asked_prefs and not (replacing or refresh) and priority not in ("U", "B"):  # U/B: ogni giro in piu' costa 15-20 ore di agenda su 24/48
         if "prefs" in sent.lines:
             return
         sent.lines.add("prefs")

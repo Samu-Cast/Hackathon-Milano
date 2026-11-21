@@ -105,7 +105,7 @@ class BookingCentre(unittest.TestCase):
         async def go():
             t = town(rx=[(RX, C1, "VIS-FIS", "B", NOW), ("prescription_number-N2", "citizen:c2", "VIS-FIS", "B", NOW)])
             await to_offers(t)  # offerte per N-1 a c1
-            await t.send("citizen:c2", BC, "need.request prescription_number=prescription_number-N2", need_id="N-2")
+            await t.send("citizen:c2", BC, "need.request Buongiorno, vorrei una visita", need_id="N-2")  # senza ricetta: nessuna offerta propria
             await t.send("citizen:c2", BC, "confirm offer_id=of-S1 consent_ref=cons-x", need_id="N-2")
             self.assertEqual(t.sent_to(BC, HOSP, "confirm"), [])
             # offerta inesistente nello stesso caso
