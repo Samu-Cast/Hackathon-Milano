@@ -214,6 +214,12 @@ async def handle(role: str, city: City, message: Message, chat: list[Message]) -
         if first_word(message.text) == "cancel":
             await _on_release(city, message, chat)  # il CUP libera un posto che aveva confermato
             return
+        if "confirm" in words(message.text):
+            owner = _slot_owner(chat, city.agent_id, fields_of(message.text).get("slot_id", ""))
+            if owner and owner != message.sender:
+                # Lo slot è già in mano a un altro centro prenotazioni: nessuna ricevuta, nessun hold.
+                _LOG.info("care.confirm.slot_owned", extra={"need_id": (message.need_id or "")[:48]})
+                return
         if first_word(message.text) == "need.request":
             # Il CUP di un'altra ASST cerca posti: rispondo con i nostri slot (solo criteri).
             await _serve_partner(city, message, chat, "VIS-FIS" if role == "hospital" else "VIS-CARD")

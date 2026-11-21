@@ -68,3 +68,19 @@ async def _on_release(city: City, message: Message, chat: list[Message]) -> None
             hold_id = fields_of(row.text).get("hold_id", "")
             if hold_id and not _we(chat, agent, f"hold_id={hold_id}", to=LEDGER, word="cancel"):
                 await _say(city, LEDGER, f"cancel hold_id={hold_id}")
+
+
+def _slot_owner(chat: list[Message], agent: str, slot: str) -> str:
+    """Il centro prenotazioni che per primo ha confermato ``slot`` con noi in questo caso."""
+
+    if not slot:
+        return ""
+    for row in chat:
+        if (
+            row.sender.startswith("agent:")
+            and row.sender != agent
+            and "confirm" in words(row.text)
+            and fields_of(row.text).get("slot_id") == slot
+        ):
+            return row.sender
+    return ""
