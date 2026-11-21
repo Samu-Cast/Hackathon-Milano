@@ -302,9 +302,7 @@ def _facility_red_flag(message: Message) -> bool:
     if understood(message).body.get("is_emergency") is True:
         return True
     lowered = " ".join(message.text.lower().replace("’", "'").split())
-    if _NOT_FLAG.search(lowered):
-        return False
-    return any(flag in lowered for flag in _FACILITY_FLAGS)
+    return _alarm_text(message.text, _FACILITY_FLAGS)
 
 
 def _it(chat: list[Message]) -> bool:
@@ -932,7 +930,4 @@ def fitting(
 def _emergency(message: Message) -> bool:
     if understood(message).body.get("is_emergency") is True:
         return True
-    lowered = message.text.lower()
-    return any(flag in lowered for flag in _RED_FLAGS)
-
-
+    return _alarm_text(message.text, _RED_FLAGS)

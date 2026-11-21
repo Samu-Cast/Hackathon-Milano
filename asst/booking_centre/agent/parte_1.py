@@ -898,3 +898,72 @@ def _detect_lang(text: str) -> str | None:
     return best
 
 
+
+
+# --- livello 8: segnali d'allarme (stessa lista in ogni agente che li legge) --------------------
+# Una negazione vicina ("non ho dolore al petto") non conta. Una frase d'emergenza conta anche
+# se il resto del messaggio dice altro: niente "NOT_FLAG" sull'intero messaggio.
+_NEGATIONS = frozenset({"non", "senza", "nessun", "nessuna", "niente", "alcun", "alcuna", "nemmeno",
+                        "neanche", "né", "no", "not", "without", "never", "nor", "any", "don't", "dont",
+                        "don’t", "doesn't", "didn't"})
+
+
+def _negated(lowered: str, start: int) -> bool:
+    """True se una delle due parole prima della frase la nega."""
+
+    words_before: list[str] = []
+    for token in lowered[:start].split()[-2:]:
+        if token[-1:] in ",.;:!?":
+            words_before = []
+            continue
+        words_before.append(token.strip("\"'()"))
+    return any(token in _NEGATIONS for token in words_before)
+
+
+_ALARM = re.compile(
+    r"\b(?:dolor[ei]|male|fitt[ae]|stretta|oppressione|peso|pesantezza)\s+(?:\w+\s+){0,2}?"
+    r"(?:al|nel|sul|in|di)\s+(?:petto|torace)\b"
+    r"|\b(?:petto|torace)\s+(?:che\s+)?mi\s+fa\s+male\b|\bmi\s+fa\s+male\s+(?:il|al)\s+(?:petto|torace)\b"
+    r"|\bdolore\s+toracic[oa]\b|\bchest\s+(?:pain|pains|pressure|tightness|hurts|hurting)\b"
+    r"|\bpains?\s+in\s+(?:my|the)\s+chest\b|\bmy\s+chest\s+(?:hurts|is\s+hurting|aches)\b"
+    r"|\b(?:non\s+riesco|fatico|faccio\s+fatica)\s+(?:più\s+)?a\s+respirare\b"
+    r"|\b(?:can'?t|cannot|can\s+not)\s+breathe\b|\bshort(?:ness)?\s+of\s+breath\b|\bfame\s+d'aria\b"
+    r"|\bmanca\s+(?:il\s+)?(?:respiro|fiato)\b"
+    r"|\bnon\s+riesco\s+(?:più\s+)?a\s+(?:muovere|sentire)\s+(?:le\s+|sulle\s+)?gamb[ae]\b"
+    r"|\b(?:perdita|perdo|perso|perdendo)\s+(?:di\s+|la\s+)?forza\s+(?:alle|nelle|delle|alla|nella)\s+gamb[ae]\b"
+    r"|\b(?:loss|lost|losing)\s+(?:of\s+)?(?:the\s+)?strength\s+in\s+(?:my\s+|the\s+|both\s+)?legs?\b"
+    r"|\bcan(?:'|’)?t\s+(?:move|feel)\s+my\s+legs\b"
+    r"|\bsvenut[oa]\b|\bsvenimento\b|\bperso\s+i\s+sensi\b|\bfainted\b|\bpassed\s+out\b"
+    r"|\bconvulsion\w*|\bseizure\b|\bcrisi\s+epilettica\b"
+    r"|\bemorragi\w*|\bheavy\s+bleeding\b|\bbleeding\s+heavily\b|\bsevere\s+bleeding\b"
+    r"|\bsanguinament\w*\s+(?:molto|forte|abbondante|intenso)\b|\bsanguino\s+molto\b"
+    r"|\b(?:perdo|perdendo|perso|perde)\s+(?:molto\s+|tanto\s+)?sangue\b"
+    r"|\bsangue\s+dalla\s+bocca\b|\bvomito\s+sangue\b"
+    r"|\bdolore\s+(?:fortissimo|insopportabile)\b|\bsevere\s+pain\b|\bunbearable\s+pain\b"
+    r"|\bfar(?:mi)?\s+del\s+male\b|\btogliermi\s+la\s+vita\b|\bfarla\s+finita\b|\bsuicid\w*"
+    r"|\bhurt\s+myself\b|\bkill\s+myself\b"
+    r"|\bbocca\s+storta\b|\bparlo\s+male\s+all'improvviso\b|\bnon\s+riesco\s+a\s+parlare\b"
+    r"|\bdolor[ea]?\s+(?:en\s+el\s+pecho|de\s+pecho)\b|\bno\s+puedo\s+respirar\b"
+    r"|\bdouleur\s+(?:à\s+la\s+poitrine|thoracique)\b|\bje\s+n'arrive\s+pas\s+à\s+respirer\b"
+    r"|\bbrustschmerz\w*|\bschmerzen\s+in\s+der\s+brust\b|\batemnot\b"
+    r"|\bdurere\s+în\s+piept\b|\bnu\s+pot\s+respira\b|\bdor\s+no\s+peito\b|\bnão\s+consigo\s+respirar\b"
+)
+_ALARM_FOREIGN = (
+    "ألم في الصدر", "لا أستطيع التنفس", "胸痛", "呼吸困难", "喘不过气", "біль у грудях", "не можу дихати",
+)
+
+
+def _alarm_text(text: str, extra: tuple[str, ...] = ()) -> bool:
+    """extra: le frasi storte dell'agente (_RED_FLAGS o _FACILITY_FLAGS), con la stessa negazione."""
+
+    lowered = " ".join(text.lower().replace("’", "'").split())
+    for found in _ALARM.finditer(lowered):
+        if not _negated(lowered, found.start()):
+            return True
+    for flag in extra:
+        at = lowered.find(flag)
+        while at >= 0:
+            if not _negated(lowered, at):
+                return True
+            at = lowered.find(flag, at + 1)
+    return any(flag in lowered for flag in _ALARM_FOREIGN)

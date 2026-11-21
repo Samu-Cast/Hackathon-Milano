@@ -144,7 +144,7 @@ def _red_flag(text: str) -> bool:
     lowered = _norm(text)
     if fields_of(text).get("is_emergency", "").lower() == "true":
         return True
-    return any(flag in lowered for flag in _RED_FLAGS)
+    return _alarm_text(text, _RED_FLAGS)
 
 
 def _injection(text: str) -> bool:
