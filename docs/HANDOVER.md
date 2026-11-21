@@ -93,3 +93,38 @@ Non lanciare `city deploy` finché:
 
 - Noi: CUP 1.0.1–1.0.4, ospedale 1.0.1–1.0.2, GP 1.0.1–1.0.2, specialista 1.0.1–1.0.3.
 - Pietro: consultorio 1.0.4 (versione più recente in gara), e i suoi file di GP e specialista.
+
+
+---
+
+## Aggiornamento 21/11 ~06:15 UTC (07:15 ora italiana)
+
+**Stato della gara.** La wave è `closed` (livello 1): nessun cittadino nuovo fino alla ripresa delle 10:00
+ora italiana (briefing p. 7: dalle 10:00 alle 16:00 livello 8 con impostori e complessità segreta).
+Classifica pubblica: 10° con 3239 punti; l'8° ne ha 3361. I percorsi già chiusi vengono ancora giudicati,
+quindi le altre squadre salgono anche a wave chiusa.
+
+**Versioni in gara (verificate con `city status`):** booking_centre 1.0.13, hospital 1.0.8, gp 1.0.10,
+specialist 1.0.8, family_counseling 1.0.8 (rilasciato da un collega: non sovrascriverlo senza chiedere).
+
+**Come misurare se un rilascio funziona** (la classifica pubblica basta, senza login):
+
+- `https://projectnandaitaly.ai/v1/leaderboard`: punteggio per squadra; per agente `reputation` e `rating_count`.
+- `https://projectnandaitaly.ai/v1/scoreboard`: stato della wave e serie storica del punteggio (campioni ogni ~5 s).
+- L'indicatore pulito è la media per valutazione di un agente (`delta reputation / delta rating_count`) su
+  una finestra in fase ATTIVA. Il punteggio totale al minuto è sporco: il traffico va a fasi (30 min attivi, 30 di pausa).
+- Rollback: `city rollback agent:<agente> --to <versione>` (la versione precedente rilasciata).
+
+**Cosa ho cambiato oggi** (tutto su `main`, test locali con sostituti, non provano la piattaforma):
+
+- hospital/specialist (stesso brain): storia del caso senza `need_id`, confirm/cancel solo da un centro
+  prenotazioni che l'Index restituisce, il posto è del primo CUP che conferma, fault.cancel avvisa chi aveva confermato.
+- gp: rinnovo solo al titolare della ricetta, storia del caso senza `need_id`.
+- CUP e consultorio: l'elenco delle opzioni nomina `offer_id` e `slot_id` (il cittadino chiedeva "Which slot_id?").
+- CUP: per priorità U e B niente domanda sulle preferenze (ogni giro costa 15-20 ore di agenda su 24/48).
+  **ESPERIMENTO non ancora validato**: se il CUP perde più di 1,2 punti a valutazione su almeno 40 valutazioni,
+  tornare alla 1.0.12 con `city rollback agent:booking_centre --to 1.0.12`.
+
+**Da chiedere agli altri:** i JSON dei percorsi di ospedale e specialista (Scarica JSON nella console, tab Percorsi),
+con le righe della rubrica: ospedale 976 valutazioni a +94 totali, specialista 414 a +117. È l'unico modo per
+sapere cosa perdono: da fuori non si vedono.
