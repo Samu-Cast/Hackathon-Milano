@@ -151,7 +151,7 @@ async def _on_citizen_cancel(city: City, message: Message, chat: list[Message], 
     options = fitting(
         lines, now=now, priority=priority, lang=_lang(chat), procedure=procedure,
         skip=_citizen_cancelled(key) | _cancelled_slots(chat, agent, citizen),
-        skip_facilities=_unreachable(chat, agent), anchor=_anchor(chat),
+        skip_facilities=_unreachable(chat, agent),
     )[:_MAX_OFFERS]
     if not options:
         return
@@ -378,56 +378,3 @@ def _own_street(city: City) -> str:
         return Path(__file__).with_name("door.txt").read_text(encoding="utf-8").strip()
     except OSError:
         return ""
-
-
-# --- rifiuti e rilascio (percorsi 000202/000204/000212) ---
-
-
-async def _withdraw_one(
-    city: City, chat: list[Message], key: str, citizen: str, rejected: str, keep: list[str]
-) -> None:
-    """Il cittadino ha scartato un'opzione: lo confermo e ripeto le opzioni ancora valide."""
-
-    lines: dict[str, str] = {}
-    for row in _ours(chat, city.agent_id, citizen):
-        for line in row.text.splitlines():
-            oid = fields_of(line).get("offer_id", "")
-            if first_word(line) == "offer" and oid in keep:
-                lines[oid] = line
-    if not lines:
-        return
-    tone = _tone(chat)
-    head = (
-        "Va bene, ho ritirato quell'opzione. Restano valide queste: per sceglierne una mi risponda con il suo offer_id."
-        if tone == "it" else
-        "All right, I have withdrawn that option. These are still available: to choose one, reply with its offer_id."
-    )
-    await _once(city, key, f"withdrawn:{rejected or len(keep)}", citizen, "\n".join([head, *lines.values()]))
-
-
-def _citizen_answered_last_offer(chat: list[Message], agent: str, citizen: str) -> bool:
-    """True se dopo la nostra ultima offerta il cittadino ha scritto (o non c'è nessuna offerta)."""
-
-    last_offer = max(
-        (i for i, row in enumerate(chat) if row.sender == agent and row.recipient == citizen
-         and "offer" in line_heads(row.text)),
-        default=-1,
-    )
-    if last_offer < 0:
-        return True
-    return any(row.sender == citizen for row in chat[last_offer + 1:])
-
-
-async def _release(city: City, key: str, citizen: str, number: str | None, tone: str) -> None:
-    """Chiudo con garbo: niente prenotazione, niente dati fuori, la porta resta aperta."""
-
-    head = "cancel reason=released" + (f" prescription_number={number}" if number else "")
-    await _once(city, key, "released", citizen, head + "\n" + tr("released", tone))
-
-
-def _count_ledger(chat: list[Message], head: str) -> int:
-    return sum(1 for row in chat if row.sender == LEDGER and first_word(row.text) == head)
-
-
-def _trigger(message: Message) -> str:
-    return fields_of(message.text).get("offer_id") or message.msg_id

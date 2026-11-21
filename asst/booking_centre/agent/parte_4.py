@@ -85,13 +85,10 @@ async def _advance(
         if trigger:
             sent.lines.add(f"agenda:{trigger}")
         await _say(city, LEDGER, "agenda")
-    fresh_rules = bool(trigger) and f"rules:{trigger}" not in sent.lines  # la regola può cambiare
-    if fresh_rules or ("rules" not in sent.lines and not any(
+    if "rules" not in sent.lines and not any(
         row.text.strip() == "rules" for row in _ours(chat, agent, LEDGER)
-    )):
+    ):
         sent.lines.add("rules")
-        if trigger:
-            sent.lines.add(f"rules:{trigger}")
         await _say(city, LEDGER, "rules")
 
     need_new_agenda = fresh_agenda
@@ -184,11 +181,7 @@ async def _advance(
     offered = _offered_slots(chat, agent, citizen) | {
         slot for slot in sent.offers if not slot.startswith("wl-")
     }
-    # Le offerte "sul tavolo" sono solo quelle ancora aperte: se il cittadino le ha rifiutate tutte e il
-    # turno del rifiuto non ha prodotto date nuove, un suo nuovo messaggio deve far ripartire la ricerca
-    # (non restare muti né rimandare le stesse offerte già rifiutate). `offered` resta l'insieme da non ripetere.
-    still_open = offered - _cancelled_slots(chat, agent, citizen) - _citizen_cancelled(key)
-    if still_open and not (replacing or refresh):
+    if offered and not (replacing or refresh):
         if latest is not None and _repeat_request(chat, agent, latest):
             await _resend_offers(city, chat, key, citizen, latest)
             return
@@ -208,19 +201,15 @@ async def _advance(
 
     def pick(rows: list[Message], **prefs: object) -> list[dict[str, str]]:
         lines, _, _ = _world_lines(rows)
-        kw = dict(
-            now=now, priority=priority, lang=lang, procedure=procedure,
+        return fitting(
+            lines, now=now, priority=priority, lang=lang, procedure=procedure,
             skip=skip, skip_facilities=skip_fac, skip_doctors=bad_doctors, anchor=_anchor(rows),
+            **prefs,  # type: ignore[arg-type]
         )
-        near = fitting(lines, **kw, **prefs)  # type: ignore[arg-type]
-        safe = fitting(lines, lead=_SAFE_LEAD, **kw, **prefs)  # type: ignore[arg-type]
-        ids = {slot["slot_id"] for slot in safe}
-        # Prima gli slot con margine, poi (se servono per arrivare a tre offerte) quelli vicini.
-        return safe + [slot for slot in near if slot["slot_id"] not in ids]
 
     # Pagine da leggere: con la gara lunga (1200 minuti, ~64 giorni di catalogo) le prime pagine
     # sono date passate, quindi salto direttamente a quelle da oggi in poi (_next_page).
-    limit = _horizon(_anchor(chat) or now, priority, extend=True)
+    limit = _horizon(now, priority, extend=True)
     for _round in range(_MAX_PAGE):
         if _has_world(chat) and pick(chat, days=days, gender=gender, period=period):
             break
@@ -332,18 +321,8 @@ async def _citizen_declined(city: City, message: Message, key: str) -> None:
         if not offer.get("waiting_list") and offer.get("slot_id") not in gone
     ]
     if still_open:
-        # Rifiuto di UNA opzione (es. reason=lang): rispondo a quell'offerta e lascio in tavola
-        # le altre ancora valide, con i loro offer_id, invece di restare in silenzio.
-        bad = _rejected_for(chat, agent, citizen, "lang") | _rejected_for(chat, agent, citizen, "gender")
-        keep = [oid for oid in still_open if offers[oid].get("doctor_id") not in bad]
-        if not keep:
-            still_open = []
-        else:
-            await _withdraw_one(city, chat, key, citizen, fields_of(message.text).get("offer_id", ""), keep)
-            return
-    if still_open:
         return
-    waiting =[oid for oid, offer in offers.items() if offer.get("waiting_list")]
+    waiting = [oid for oid, offer in offers.items() if offer.get("waiting_list")]
     if waiting and not any(offer.get("slot_id") and offer["slot_id"] not in gone for offer in offers.values()):
         # Annulla prima di accettare la lista d'attesa: non lo iscrivo e glielo confermo.
         offer_id = fields_of(message.text).get("offer_id") or waiting[-1]
@@ -357,6 +336,14 @@ async def _citizen_declined(city: City, message: Message, key: str) -> None:
         return
     _sent(key).lines.add(f"declined-all:{len(offers)}")
     await _advance(city, message, chat, key, replacing=False, refresh=True, declined=True)
+
+
+def _count_ledger(chat: list[Message], head: str) -> int:
+    return sum(1 for row in chat if row.sender == LEDGER and first_word(row.text) == head)
+
+
+def _trigger(message: Message) -> str:
+    return fields_of(message.text).get("offer_id") or message.msg_id
 
 
 def _offered_slots(chat: list[Message], agent: str, citizen: str) -> set[str]:
@@ -381,6 +368,30 @@ def _cancelled_slots(chat: list[Message], agent: str, citizen: str) -> set[str]:
         if fields.get("slot_id"):
             gone.add(fields["slot_id"])
     return gone
+
+
+async def _hidden_facilities(city: City, procedure: str | None, facilities: set[str]) -> set[str]:
+    """Strutture del mondo che l'Index non restituisce più (es. ospedale sospeso dalla città).
+
+    Prudente: una struttura è "nascosta" solo se l'Index risponde con altri agenti ma non con
+    lei, sia cercando il servizio sia cercando il suo id. Se l'Index tace non salto nulla."""
+
+    service = _SERVICE_OF.get(procedure or "", "")
+    candidates = {fac for fac in facilities if fac.startswith("agent:")}
+    if not service or not candidates:
+        return set()
+    seen: set[str] = set()
+    answered = False
+    for query in (service, *sorted(candidates)):
+        try:
+            peers = await city.find(query)
+        except CapError:
+            return set()
+        answered = answered or bool(peers)
+        seen.update(peer.agent_id for peer in peers)
+    if not answered:
+        return set()
+    return candidates - seen
 
 
 def _unreachable(chat: list[Message], agent: str) -> set[str]:
@@ -438,12 +449,6 @@ async def _send_offers(
     else:
         tag = ""
         picked = [slot for slot in slots if slot["slot_id"] not in sent.offers][:_MAX_OFFERS]
-    if not partner:
-        in_world = _world_slot_ids(chat)
-        dropped = [slot["slot_id"] for slot in picked if slot["slot_id"] not in in_world]
-        if dropped:
-            _LOG.warning("booking.offer.not_in_world", extra={"slots": ",".join(dropped)[:200]})
-        picked = [slot for slot in picked if slot["slot_id"] in in_world]
     if not picked:
         return
     label = _label(procedure, tone)
@@ -518,10 +523,7 @@ async def _beyond_or_release(
     cittadino le ha già rifiutate, rilascio la richiesta."""
 
     sent = _sent(key)
-    # Anche le offerte appena inviate in questo processo (la cronologia può non mostrarle ancora):
-    # così il rilascio non parte mai nello stesso istante delle alternative.
-    mine = {slot for slot in sent.offers if not slot.startswith("wl-")}
-    open_slots = (_offered_slots(chat, city.agent_id, citizen) | mine) - _cancelled_slots(chat, city.agent_id, citizen) - _citizen_cancelled(key)
+    open_slots = _offered_slots(chat, city.agent_id, citizen) - _cancelled_slots(chat, city.agent_id, citizen) - _citizen_cancelled(key)
     if open_slots:
         return  # ci sono offerte ancora aperte: aspetto che il cittadino scelga o rifiuti
     agenda = _ledger(chat, "agenda") or {}
@@ -547,12 +549,11 @@ async def _beyond_or_release(
         later_slots = fitting(
             lines, now=now, priority=None, lang=_lang(chat), procedure=procedure,
             skip=skip, skip_facilities=_unreachable(chat, agent), skip_doctors=bad_doctors,
-            anchor=_anchor(chat),
         )
         # Seconda alternativa: entro la scadenza, allentando la lingua del medico (se ne aveva
         # chiesta una diversa dall'italiano). Le due vanno nello stesso messaggio.
         doctor_lang = _lang(chat)
-        horizon = _horizon(_anchor(chat) or now, priority)
+        horizon = _horizon(now, priority)
         still_in_time = [slot for slot in later_slots if horizon is None or (_when(slot["at"]) or now) < horizon]
         if still_in_time:
             # Trovate solo leggendo altre pagine, ma ENTRO la scadenza: offerte normali, senza
@@ -564,9 +565,7 @@ async def _beyond_or_release(
             return
         in_time: list[dict[str, str]] = []
         alt_lang = ""
-        if doctor_lang not in ("", "it") and not later_slots and "other_lang_in_time" in _fallback_rules(procedure):
-            # Solo se nessun medico parla la sua lingua, nemmeno oltre la scadenza: un posto in
-            # un'altra lingua il cittadino lo rifiuta sempre (percorsi 000202/000204/000212).
+        if doctor_lang not in ("", "it"):
             # Allento la lingua del medico, entro la scadenza: prima la lingua in cui il cittadino
             # ci scrive (la conosce), poi l'italiano, ma non se ha già rifiutato per lingua.
             chat_lang = _tone(chat)
@@ -578,7 +577,6 @@ async def _beyond_or_release(
                     lines, now=now, priority=priority, lang=code, procedure=procedure,
                     skip=skip | {slot["slot_id"] for slot in later_slots},
                     skip_facilities=_unreachable(chat, agent), skip_doctors=bad_doctors,
-                    anchor=_anchor(chat),
                 )
                 if in_time:
                     alt_lang = code
@@ -592,17 +590,15 @@ async def _beyond_or_release(
                 procedure=procedure, tone=tone, relaxed=True, replacing=False, note=note, beyond=True,
                 intro_text=intro,
             )
-            sent.lines.add("beyond_sent")
             return
-    if "beyond" in sent.lines and "beyond_sent" not in sent.lines:
-        return  # le alternative stanno partendo in un altro turno: mai rilascio nello stesso istante
-    try:
-        fresh = await city.history(need_id=next((r.need_id for r in reversed(chat) if r.need_id), None))
-    except CapError:
-        fresh = chat
-    if not _citizen_answered_last_offer(fresh or chat, city.agent_id, citizen):
-        return  # mai rilasciare prima che il cittadino abbia risposto alle ultime proposte
     await _release(city, key, citizen, number, tone)
+
+
+async def _release(city: City, key: str, citizen: str, number: str | None, tone: str) -> None:
+    """Chiudo con garbo: niente prenotazione, niente dati fuori, la porta resta aperta."""
+
+    head = "cancel reason=released" + (f" prescription_number={number}" if number else "")
+    await _once(city, key, "released", citizen, head + "\n" + tr("released", tone))
 
 
 async def _no_slot_fallback(

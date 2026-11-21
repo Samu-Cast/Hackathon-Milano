@@ -122,7 +122,7 @@ def _request_deadline(chat: list[Message], priority: str | None) -> str:
     now = _when(agenda.get("agenda_now") or agenda.get("now") or "")
     if now is None or priority in (None, "P"):
         return ""
-    horizon = _horizon(_anchor(chat) or now, priority)
+    horizon = _horizon(now, priority)
     return horizon.isoformat() if horizon else ""
 
 
@@ -147,7 +147,7 @@ def _partner_candidates(
         skip |= _offered_slots(chat, agent, citizen)
     days, gender, _ = _preferences(chat, agent, citizen)
     period = _period(chat, agent, citizen)
-    common = dict(now=now, priority=priority, lang=_lang(chat), procedure=procedure, skip=skip, partner=True, anchor=_anchor(chat),
+    common = dict(now=now, priority=priority, lang=_lang(chat), procedure=procedure, skip=skip, partner=True,
                   skip_doctors=_rejected_doctors(chat, agent, citizen))
     strict = fitting(lines, days=days, gender=gender, period=period, **common)
     if strict or not (days or gender or period):
