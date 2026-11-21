@@ -20,7 +20,7 @@ _LEAD = timedelta(hours=4)
 _DOCTORS: dict[str, tuple[frozenset[str], str, frozenset[str]]] = {
     "h1": (frozenset({"it", "en"}), "f", frozenset({"mon", "tue", "wed"})),
     "h2": (frozenset({"it"}), "m", frozenset({"wed", "thu", "fri"})),
-    "h3": (frozenset({"it", "*"}), "m", frozenset({"tue", "thu"})),
+    "h3": (frozenset({"it", "pt"}), "m", frozenset({"tue", "thu"})),
     "s1": (frozenset({"it", "en"}), "m", frozenset({"mon", "wed", "fri"})),
     "s2": (frozenset({"it"}), "f", frozenset({"tue", "thu"})),
     "c1": (frozenset({"it", "en"}), "f", frozenset({"mon", "tue", "wed", "thu", "fri"})),
@@ -382,7 +382,7 @@ def _speaks(doctor_id: str, lang: str) -> bool:
     langs = spec[0]
     if lang in langs:
         return True
-    return "*" in langs and lang not in {"it", "en"}
+    return False  # nessuna lingua 'rara' generica: vale solo la lingua dichiarata nel registro
 
 
 def fitting(

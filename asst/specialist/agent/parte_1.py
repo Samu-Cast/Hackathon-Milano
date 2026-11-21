@@ -29,7 +29,7 @@ _LEAD = timedelta(hours=4)
 _DOCTORS: dict[str, tuple[frozenset[str], str, frozenset[str]]] = {
     "h1": (frozenset({"it", "en"}), "f", frozenset({"mon", "tue", "wed"})),
     "h2": (frozenset({"it"}), "m", frozenset({"wed", "thu", "fri"})),
-    "h3": (frozenset({"it", "*"}), "m", frozenset({"tue", "thu"})),
+    "h3": (frozenset({"it", "pt"}), "m", frozenset({"tue", "thu"})),
     "s1": (frozenset({"it", "en"}), "m", frozenset({"mon", "wed", "fri"})),
     "s2": (frozenset({"it"}), "f", frozenset({"tue", "thu"})),
     "c1": (frozenset({"it", "en"}), "f", frozenset({"mon", "tue", "wed", "thu", "fri"})),
@@ -592,7 +592,7 @@ async def _serve_partner(city: City, message: Message, chat: list[Message], defa
 _PARTNER_ACK_AFTER = 4.0
 # Organico comune a tutte le ASST (kit: «gli stessi medici»). h3 parla anche la lingua rara
 # dell'ASST, che non conosciamo con certezza: per h3 non dichiaro la lingua.
-_DOCTOR_LANG = {"h1": "it/en", "h2": "it", "s1": "it/en", "s2": "it", "c1": "it/en"}
+_DOCTOR_LANG = {"h1": "it/en", "h2": "it", "h3": "it/pt", "s1": "it/en", "s2": "it", "c1": "it/en"}
 
 
 def _partner_speaks(doctor_id: str, lang: str) -> bool:
@@ -872,7 +872,7 @@ def _speaks(doctor_id: str, lang: str) -> bool:
     langs = spec[0]
     if lang in langs:
         return True
-    return "*" in langs and lang not in {"it", "en"}
+    return False  # nessuna lingua 'rara' generica: vale solo la lingua dichiarata nel registro
 
 
 def fitting(
