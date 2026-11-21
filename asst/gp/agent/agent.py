@@ -26,6 +26,17 @@ import re
 
 from city_sdk.city import LEDGER, CapError, City, Message, Need, OutOfScope, clinical, understood
 
+async def _case(city: City, need_id: str | None) -> list[Message]:
+    """La storia di UN caso. Senza need_id non c'è un caso da ricostruire: city.history(need_id=None)
+    restituirebbe l'intera mailbox (tutti i percorsi di tutti i cittadini), lenta e da non
+    mescolare. In quel caso resta solo il messaggio in ingresso."""
+
+    if not need_id:
+        inbound = city.inbound
+        return [inbound] if inbound is not None else []
+    return await city.history(need_id=need_id)
+
+
 _LOG = logging.getLogger("gp")
 _PULL_TRIES = 24
 _PULL_PAUSE = 0.25
@@ -178,7 +189,7 @@ async def _await_rx(city: City, need_id: str | None, chat: list[Message], number
     fresh = chat
     for attempt in range(_PULL_TRIES):
         try:
-            fresh = await city.history(need_id=need_id)
+            fresh = await _case(city, need_id)
         except CapError:
             fresh = chat
         for row in fresh:
@@ -205,7 +216,7 @@ async def main(need: Need, city: City) -> None:
     if text == "__error__":
         raise RuntimeError("application")
     try:
-        chat = await city.history(need_id=message.need_id)
+        chat = await _case(city, message.need_id)
     except CapError:
         chat = []
     if all(r.msg_id != message.msg_id for r in chat):

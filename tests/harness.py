@@ -164,6 +164,13 @@ class Ledger:
             ref = f"L-{next(self._n)}"
             self.bookings[hold_id] = {"slot_id": hold["slot_id"], "citizen": hold["citizen"], "ledger_ref": ref, "by": sender, "need": hold["need"]}
             return f"committed booking_id={hold_id} ledger_ref={ref} slot_id={hold['slot_id']}"
+        if op == "cancel":
+            hold_id = f.get("hold_id", "")
+            if hold_id not in self.holds and hold_id not in self.bookings:
+                return f"refused cancel hold_id={hold_id} code=NOT_FOUND"
+            self.holds.pop(hold_id, None)
+            self.bookings.pop(hold_id, None)
+            return f"cancelled hold_id={hold_id}"
         if op == "checkin":
             bid = f.get("booking_id", "")
             booking = self.bookings.get(bid)

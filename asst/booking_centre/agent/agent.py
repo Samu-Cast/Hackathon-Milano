@@ -36,6 +36,17 @@ from pathlib import Path
 
 from city_sdk.city import LEDGER, CapError, City, Message, Need, OutOfScope, clinical, understood
 
+async def _case(city: City, need_id: str | None) -> list[Message]:
+    """La storia di UN caso. Senza need_id non c'è un caso da ricostruire: city.history(need_id=None)
+    restituirebbe l'intera mailbox (tutti i percorsi di tutti i cittadini), lenta e da non
+    mescolare. In quel caso resta solo il messaggio in ingresso."""
+
+    if not need_id:
+        inbound = city.inbound
+        return [inbound] if inbound is not None else []
+    return await city.history(need_id=need_id)
+
+
 _LOG = logging.getLogger("booking_centre")
 
 # --- costanti ------------------------------------------------------------------------------------
@@ -986,7 +997,7 @@ async def main(need: Need, city: City) -> None:
         raise OutOfScope()
 
     try:
-        chat = await city.history(need_id=message.need_id)
+        chat = await _case(city, message.need_id)
     except CapError:
         chat = []
     if all(row.msg_id != message.msg_id for row in chat):
@@ -1489,6 +1500,19 @@ def _speaks(langs: frozenset[str], lang: str) -> bool:
     return "*" in langs and lang not in {"it", "en"}
 
 
+def _anchor(chat: list[Message]) -> datetime | None:
+    """La PRIMA ora di agenda letta in questo caso: da lì corre la scadenza della priorità,
+    anche quando si riprenota dopo un annullamento."""
+
+    for row in chat:
+        if row.sender == LEDGER and first_word(row.text) == "agenda":
+            fields = fields_of(row.text)
+            at = _when(fields.get("agenda_now") or fields.get("now") or fields.get("at") or "")
+            if at is not None:
+                return at
+    return None
+
+
 def _horizon(now: datetime, priority: str | None) -> datetime | None:
     if priority == "U":
         return now.replace(hour=23, minute=59, second=59, microsecond=0)
@@ -1536,12 +1560,16 @@ def fitting(
     skip: set[str] | frozenset[str] = frozenset(),
     skip_facilities: set[str] | frozenset[str] = frozenset(),
     any_lang: bool = False,
+    anchor: datetime | None = None,
 ) -> list[dict[str, str]]:
     """Slot che il cittadino può accettare: futuri, liberi, entro la priorità, nella sua lingua,
     fuori dalla riserva urgente se la priorità non è U, nei giorni di lavoro del medico e (se
-    date) con le sue preferenze. Ordinati dal più vicino."""
+    date) con le sue preferenze. Ordinati dal più vicino.
 
-    horizon = _horizon(now, priority)
+    ``anchor``: l'istante da cui corre la scadenza di priorità (il primo contatto del caso).
+    Senza, la scadenza scivolerebbe in avanti a ogni riprenotazione (livello 6)."""
+
+    horizon = _horizon(anchor or now, priority)
     earliest = now + _LEAD
     known = _doctors(lines)
     chosen: list[tuple[datetime, dict[str, str]]] = []
@@ -1761,7 +1789,7 @@ async def _until(
     fresh = chat
     for attempt in range(_PULL_TRIES):
         try:
-            fresh = await city.history(need_id=need_id)
+            fresh = await _case(city, need_id)
         except CapError:
             fresh = chat
         if ready(fresh):
@@ -2118,7 +2146,16 @@ async def _desk(city: City, message: Message, chat: list[Message]) -> None:
 
     # Il cittadino annulla o rinuncia: mai "Fatto" né "grazie per la scelta". Libero il posto
     # presso la struttura e, se la visita gli serve ancora, gli propongo un'alternativa.
-    if _cancel_intent(text):
+    if _reported_cancel(text):
+        handled: list[bool] = []
+
+        async def reported() -> None:
+            handled.append(await _on_reported_cancel(city, message, chat, key))
+
+        await _locked(key, reported)
+        if handled and handled[0]:
+            return
+    if _cancel_intent(text) and not _reported_cancel(text):
         await _locked(key, lambda: _on_citizen_cancel(city, message, chat, key))
         return
 
@@ -2489,7 +2526,7 @@ async def _advance(
         lines, _, _ = _world_lines(rows)
         return fitting(
             lines, now=now, priority=priority, lang=lang, procedure=procedure,
-            skip=skip, skip_facilities=skip_fac, **prefs,  # type: ignore[arg-type]
+            skip=skip, skip_facilities=skip_fac, anchor=_anchor(rows), **prefs,  # type: ignore[arg-type]
         )
 
     for _round in range(_MAX_PAGE):
@@ -2725,7 +2762,7 @@ async def _no_slot_fallback(
         # Rilassamento 2: la lingua (nei tempi della ricetta), solo per chi non parla italiano.
         other_lang: list[dict[str, str]] = []
         if lang not in {"it", ""}:
-            other_lang = fitting(lines, now=now, priority=priority, lang=lang, procedure=procedure,
+            other_lang = fitting(lines, now=now, priority=priority, lang=lang, procedure=procedure, anchor=_anchor(chat),
                                  skip=skip, skip_facilities=skip_fac, any_lang=True)
         if later and other_lang:
             groups = [("deadline", later[:2]), ("language", other_lang[:1])]
@@ -2899,7 +2936,7 @@ async def _partner_offer(city: City, message: Message, chat: list[Message], key:
     world, _, _ = _world_lines(chat)
     if message.sender in _own_facilities(world):
         return
-    usable = fitting(lines, now=now, priority=priority, lang=_lang(chat), procedure=procedure,
+    usable = fitting(lines, now=now, priority=priority, lang=_lang(chat), procedure=procedure, anchor=_anchor(chat),
                      skip=_cancelled_slots(chat, city.agent_id, citizen))
     # La facility partner deve restare quella che ha offerto lo slot.
     for slot in usable:
@@ -3161,7 +3198,7 @@ async def _facility_unreachable(
         f"cancel offer_id={offer_id} reason=facility_unreachable facility={facility}\n" + prose,
     )
     try:
-        fresh = await city.history(need_id=message.need_id)
+        fresh = await _case(city, message.need_id)
     except CapError:
         fresh = chat
     await _advance(city, message, fresh, key, replacing=True)
@@ -3175,6 +3212,69 @@ _CANCEL_WORDS = re.compile(
     r"renunț\w*|nu mai am nevoie)\b|إلغاء|ألغ|取消|скасу",
     re.IGNORECASE,
 )
+
+
+# Il cittadino RIFERISCE che la prenotazione gli è stata annullata (briefing p. 8: dal livello 6
+# ogni cittadino riceve un fault.cancel alla prima prenotazione). Non è una sua rinuncia: va
+# riprenotato subito, entro la scadenza. Solo forme passive o "mi hanno annullato".
+_REPORTED_CANCEL = re.compile(
+    r"\b(fault\.cancel|(è|e'|é) stat[ao] (annullat|cancellat|disdett)\w*|"
+    r"sono stat[ei] (annullat|cancellat)\w*|mi hanno (annullat|cancellat|disdett)\w*|"
+    r"(ha|hanno) annullato (la mia|il mio)|"
+    r"(was|has been|got|been) (cancel+ed|called off)|they cancel+ed|"
+    r"fue cancelad\w*|han cancelado|a été annulé\w*|ont annulé|foi cancelad\w*|"
+    r"wurde (storniert|abgesagt)|a fost anulat\w*)",
+    re.IGNORECASE,
+)
+
+
+def _reported_cancel(text: str) -> bool:
+    return "fault.cancel" in words(text) or bool(_REPORTED_CANCEL.search(text))
+
+
+async def _on_reported_cancel(city: City, message: Message, chat: list[Message], key: str) -> bool:
+    """Il cittadino ci dice che la prenotazione confermata è stata annullata. Libero il posto
+    presso la struttura (se esiste ancora, così non nascono due prenotazioni), glielo dico senza
+    attribuirgli la rinuncia e propongo subito nuove date nei tempi della ricetta.
+    False se non c'è una nostra prenotazione da riprendere: il turno segue il percorso normale."""
+
+    agent = city.agent_id
+    citizen = message.sender
+    offers = _our_offers(chat, agent, citizen)
+    offer_id = ""
+    for row in _ours(chat, agent):
+        if "confirm" in line_heads(row.text) and row.recipient.startswith("agent:"):
+            candidate = fields_of(row.text).get("offer_id", "")
+            if candidate in offers:
+                offer_id = candidate
+    if not offer_id:
+        return False
+    offer = offers[offer_id]
+    slot = offer.get("slot_id", "")
+    target = _confirmed_slot(chat, agent, slot) if slot else ""
+    sent = _sent(key)
+    sent.flags.add(f"cancelled:{slot}")
+    if target and f"released:{slot}" not in sent.lines:
+        sent.lines.add(f"released:{slot}")
+        booking = ""
+        for row in _ours(chat, agent, citizen):
+            if "booking.receipt" in line_heads(row.text):
+                booking = fields_of(row.text).get("booking_id", booking)
+        parts = ["cancel", f"offer_id={offer_id}", f"slot_id={slot}", f"citizen={citizen}",
+                 "reason=reported_cancelled"]
+        if booking:
+            parts.append(f"booking_id={booking}")
+        await _say(city, target, " ".join(parts) + "\nBuongiorno, al cittadino risulta annullata "
+                   "questa prenotazione: se è ancora attiva liberatela pure, la riprenotiamo noi. Grazie!")
+    tone = _tone(chat)
+    if not _we(chat, agent, f"offer_id={offer_id}", to=citizen, head="cancel"):
+        await _say(city, citizen, f"cancel offer_id={offer_id} reason=facility_cancelled\n" + tr("facility_cancelled", tone))
+    try:
+        fresh = await _case(city, message.need_id)
+    except CapError:
+        fresh = chat
+    await _advance(city, message, fresh, key, replacing=True)
+    return True
 
 
 def _cancel_intent(text: str) -> bool:
@@ -3246,7 +3346,7 @@ async def _on_citizen_cancel(city: City, message: Message, chat: list[Message], 
     priority = (reply.get("priority") or "").upper() or None
     procedure = reply.get("procedure")
     options = fitting(
-        lines, now=now, priority=priority, lang=_lang(chat), procedure=procedure,
+        lines, now=now, priority=priority, lang=_lang(chat), procedure=procedure, anchor=_anchor(chat),
         skip=_citizen_cancelled(key) | _cancelled_slots(chat, agent, citizen),
         skip_facilities=_unreachable(chat, agent),
     )[:_MAX_OFFERS]
@@ -3287,7 +3387,7 @@ async def _on_rejection(
             break
         await asyncio.sleep(_PULL_PAUSE)
         try:
-            fresh = await city.history(need_id=message.need_id)
+            fresh = await _case(city, message.need_id)
         except CapError:
             break
     for gone in rejected(fresh):
@@ -3573,7 +3673,7 @@ async def _facility_cancel(city: City, message: Message, chat: list[Message], ke
         prose = tr("facility_cancelled", tone)
         await _say(city, citizen, f"cancel offer_id={offer_id} reason=facility_cancelled\n" + prose)
     try:
-        fresh = await city.history(need_id=message.need_id)
+        fresh = await _case(city, message.need_id)
     except CapError:
         fresh = chat
     await _advance(city, message, fresh, key, replacing=True)

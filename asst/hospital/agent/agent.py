@@ -32,6 +32,17 @@ from pathlib import Path
 
 from city_sdk.city import LEDGER, CapError, City, Message, Need, OutOfScope, clinical, understood
 
+async def _case(city: City, need_id: str | None) -> list[Message]:
+    """La storia di UN caso. Senza need_id non c'è un caso da ricostruire: city.history(need_id=None)
+    restituirebbe l'intera mailbox (tutti i percorsi di tutti i cittadini), lenta e da non
+    mescolare. In quel caso resta solo il messaggio in ingresso."""
+
+    if not need_id:
+        inbound = city.inbound
+        return [inbound] if inbound is not None else []
+    return await city.history(need_id=need_id)
+
+
 SERVICE = "hospital.physiatry"
 PROCEDURE = "VIS-FIS"
 _LOG = logging.getLogger("hospital")
@@ -195,7 +206,7 @@ async def _await_ledger(
     fresh = chat
     for attempt in range(_PULL_TRIES):
         try:
-            fresh = await city.history(need_id=need_id)
+            fresh = await _case(city, need_id)
         except CapError:
             fresh = chat
         for row in fresh:
@@ -244,7 +255,7 @@ async def main(need: Need, city: City) -> None:
 
 async def _turn(need: Need, city: City, message: Message, text: str) -> None:
     try:
-        chat = await city.history(need_id=message.need_id)
+        chat = await _case(city, message.need_id)
     except CapError:
         chat = []
     if all(r.msg_id != message.msg_id for r in chat):
@@ -372,7 +383,9 @@ async def _receipt(city: City, to: str, done: dict[str, str], offer_id: str, slo
     await _say(city, to, text)
 
 
-async def _refused(city: City, chat: list[Message], slot: str, text: str, *, to: str, offer_id: str = "") -> None:
+async def _refused(
+    city: City, chat: list[Message], slot: str, text: str, *, to: str, offer_id: str = "", lost: bool = False
+) -> None:
     if not to:
         return
     code = _code(text)
@@ -385,8 +398,13 @@ async def _refused(city: City, chat: list[Message], slot: str, text: str, *, to:
     await _say(
         city, to,
         f"cancel offer_id={offer_id or '-'} slot_id={slot} reason={code.lower()} code={code}\n"
-        "Il Ledger non ha accettato questo posto: nessuna prenotazione è stata fatta. "
-        "Potete proporre al cittadino un altro slot.",
+        + (
+            "Questo posto non è più valido (annullato dalla città o hold scaduto): la prenotazione "
+            "va rifatta. Potete proporre subito al cittadino un altro slot nei tempi della ricetta."
+            if lost else
+            "Il Ledger non ha accettato questo posto: nessuna prenotazione è stata fatta. "
+            "Potete proporre al cittadino un altro slot."
+        ),
     )
 
 
@@ -422,7 +440,7 @@ async def _on_partner_request(city: City, message: Message, chat: list[Message])
     fresh = chat
     for attempt in range(_PULL_TRIES):
         try:
-            fresh = await city.history(need_id=message.need_id)
+            fresh = await _case(city, message.need_id)
         except CapError:
             break
         if _ledger_lines(fresh, "agenda") and (_ledger_lines(fresh, "slots") or _ledger_lines(fresh, "world")):
@@ -510,7 +528,7 @@ async def _on_lost(city: City, message: Message, chat: list[Message], *, reason:
     f = fields_of(message.text)
     slot = f.get("slot_id") or _slot_of_hold(chat, f.get("hold_id", "") or f.get("booking_id", ""))
     if slot and _our_hold(chat, city.agent_id, slot) is not None:
-        await _refused(city, chat, slot, f"code={reason.upper()}", to=_confirmer(chat, city.agent_id, slot))
+        await _refused(city, chat, slot, f"code={reason.upper()}", to=_confirmer(chat, city.agent_id, slot), lost=True)
 
 
 # --- cittadino --------------------------------------------------------------------------------------
