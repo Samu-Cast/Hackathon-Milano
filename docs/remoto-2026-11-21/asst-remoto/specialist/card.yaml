@@ -1,0 +1,14 @@
+agent_id: agent:s2tevpn8zkcj
+team: team:epica
+name: specialist
+version: 1.0.4
+cap_versions:
+  - "1.0"
+profiles:
+  - mhm/1.0
+role: facility
+capabilities:
+  - specialist_care.cardiology
+no_clinical_advice: true
+endpoints:
+  mailbox: agent:s2tevpn8zkcj

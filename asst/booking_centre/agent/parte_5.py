@@ -69,7 +69,7 @@ async def _facility_unreachable(
         f"cancel offer_id={offer_id} reason=facility_unreachable facility={facility}\n" + prose,
     )
     try:
-        fresh = await city.history(need_id=message.need_id)
+        fresh = await _case(city, message.need_id)
     except CapError:
         fresh = chat
     await _advance(city, message, fresh, key, replacing=True)
@@ -350,7 +350,7 @@ async def _facility_cancel(city: City, message: Message, chat: list[Message], ke
         prose = tr("facility_cancelled", tone)
         await _say(city, citizen, f"cancel offer_id={offer_id} reason=facility_cancelled\n" + prose)
     try:
-        fresh = await city.history(need_id=message.need_id)
+        fresh = await _case(city, message.need_id)
     except CapError:
         fresh = chat
     await _advance(city, message, fresh, key, replacing=True)

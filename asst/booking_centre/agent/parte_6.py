@@ -344,7 +344,7 @@ async def _confirm_pending(
              "I am looking for an alternative straight away.")
     await _say(city, citizen, f"cancel offer_id={offer_id} reason=facility_no_reply\n{prose}")
     try:
-        fresh = await city.history(need_id=message.need_id)
+        fresh = await _case(city, message.need_id)
     except CapError:
         fresh = chat
     await _advance(city, message, fresh, key, replacing=True)
@@ -599,7 +599,7 @@ async def _wait_partners(city: City, chat: list[Message], key: str, citizen: str
     fresh = chat
     for attempt in range(tries):
         try:
-            fresh = await city.history(need_id=need or None)
+            fresh = await _case(city, need or None)
         except CapError:
             fresh = chat
         if not _partners_pending(fresh, agent):
@@ -637,4 +637,73 @@ async def _answer_consent_question(city: City, chat: list[Message], key: str, ci
     tone = _tone(chat)
     await _once(city, key, f"consent-again:{message.msg_id}", citizen,
                 _consent_head(purpose, key, fields.get("offer_id", "")) + "\n" + _consent_help(purpose, key, tone))
+    return True
+
+
+
+# --- fault.cancel riferito dal cittadino (livello 6): riprenoto, non è una sua rinuncia ---------
+
+_REPORTED_CANCEL = re.compile(
+    r"\b(fault\.cancel|(è|e'|é) stat[ao] (annullat|cancellat|disdett)\w*|"
+    r"sono stat[ei] (annullat|cancellat)\w*|mi hanno (annullat|cancellat|disdett)\w*|"
+    r"(ha|hanno) annullato (la mia|il mio)|"
+    r"(was|has been|got|been) cancel+ed|they cancel+ed|"
+    r"fue cancelad\w*|han cancelado|a été annulé\w*|ont annulé|foi cancelad\w*|"
+    r"wurde (storniert|abgesagt)|a fost anulat\w*)",
+    re.IGNORECASE,
+)
+
+
+def _reported_cancel(text: str) -> bool:
+    return "fault.cancel" in words(text) or bool(_REPORTED_CANCEL.search(text))
+
+
+def _confirm_recipients(chat: list[Message], agent: str) -> set[str]:
+    """Le strutture a cui abbiamo mandato un confirm in questo caso."""
+    return {
+        row.recipient for row in _ours(chat, agent)
+        if row.recipient.startswith("agent:") and "confirm" in line_heads(row.text)
+    }
+
+
+async def _on_reported_cancel(city: City, message: Message, chat: list[Message], key: str) -> bool:
+    """Il cittadino riferisce che la prenotazione confermata è stata annullata: libero il posto
+    presso la struttura, glielo dico senza attribuirgli la rinuncia e propongo nuove date.
+    False se non c'è una nostra prenotazione da riprendere."""
+    agent = city.agent_id
+    citizen = message.sender
+    offers = _our_offers(chat, agent, citizen)
+    offer_id = ""
+    for row in _ours(chat, agent):
+        if "confirm" in line_heads(row.text) and row.recipient.startswith("agent:"):
+            candidate = fields_of(row.text).get("offer_id", "")
+            if candidate in offers:
+                offer_id = candidate
+    if not offer_id:
+        return False
+    slot = offers[offer_id].get("slot_id", "")
+    target = _confirmed_slot(chat, agent, slot) if slot else ""
+    sent = _sent(key)
+    sent.flags.add(f"cancelled:{slot}")
+    if target and f"released:{slot}" not in sent.lines:
+        sent.lines.add(f"released:{slot}")
+        booking = ""
+        for row in _ours(chat, agent, citizen):
+            if "booking.receipt" in line_heads(row.text):
+                booking = fields_of(row.text).get("booking_id", booking)
+        parts = ["cancel", f"offer_id={offer_id}", f"slot_id={slot}", f"citizen={citizen}",
+                 "reason=reported_cancelled"]
+        if booking:
+            parts.append(f"booking_id={booking}")
+        await _say(city, target, " ".join(parts) + "\nBuongiorno, al cittadino risulta annullata "
+                   "questa prenotazione: se è ancora attiva liberatela pure. Grazie!")
+    tone = _tone(chat)
+    if not _we(chat, agent, f"offer_id={offer_id}", to=citizen, head="cancel"):
+        await _say(city, citizen, f"cancel offer_id={offer_id} reason=facility_cancelled\n"
+                   + tr("facility_cancelled", tone))
+    try:
+        fresh = await _case(city, message.need_id)
+    except CapError:
+        fresh = chat
+    await _advance(city, message, fresh, key, replacing=True)
     return True

@@ -58,7 +58,7 @@ async def main(need: Need, city: City) -> None:
         raise OutOfScope()
 
     try:
-        chat = await city.history(need_id=message.need_id)
+        chat = await _case(city, message.need_id)
     except CapError:
         chat = []
     if all(row.msg_id != message.msg_id for row in chat):
@@ -748,6 +748,7 @@ def fitting(
     skip: set[str] | frozenset[str] = frozenset(),
     skip_facilities: set[str] | frozenset[str] = frozenset(),
     extend: bool = False,
+    anchor: datetime | None = None,
     partner: bool = False,
     skip_doctors: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict[str, str]]:
@@ -755,7 +756,8 @@ def fitting(
     fuori dalla riserva urgente se la priorità non è U, nei giorni di lavoro del medico e (se
     date) con le sue preferenze. Ordinati dal più vicino."""
 
-    horizon = _horizon(now, priority, extend)
+    # La scadenza di priorità corre dal primo contatto del caso (anchor), non da adesso.
+    horizon = _horizon(anchor or now, priority, extend)
     earliest = now + _LEAD
     known = _doctors(lines)
     chosen: list[tuple[datetime, dict[str, str]]] = []
@@ -920,3 +922,13 @@ _PII = re.compile(
 )
 
 
+
+
+def _anchor(chat: list[Message]) -> datetime | None:
+    """La prima ora di agenda letta nel caso: da lì corre la scadenza anche dopo un annullamento."""
+    for row in chat:
+        if row.sender == LEDGER and first_word(row.text) == "agenda":
+            found = _when(fields_of(row.text).get("agenda_now", ""))
+            if found is not None:
+                return found
+    return None

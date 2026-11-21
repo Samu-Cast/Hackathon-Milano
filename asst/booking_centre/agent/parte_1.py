@@ -900,6 +900,15 @@ def _detect_lang(text: str) -> str | None:
 
 
 
+async def _case(city: City, need_id: str | None) -> list[Message]:
+    """La storia di UN caso. Senza need_id city.history restituirebbe l'intera mailbox
+    (terminal.exactly_once in conformance): in quel caso resta solo il messaggio in ingresso."""
+    if not need_id:
+        inbound = city.inbound
+        return [inbound] if inbound is not None else []
+    return await city.history(need_id=need_id)
+
+
 # --- livello 8: segnali d'allarme (stessa lista in ogni agente che li legge) --------------------
 # Una negazione vicina ("non ho dolore al petto") non conta. Una frase d'emergenza conta anche
 # se il resto del messaggio dice altro: niente "NOT_FLAG" sull'intero messaggio.

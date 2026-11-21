@@ -203,7 +203,7 @@ async def _advance(
         lines, _, _ = _world_lines(rows)
         return fitting(
             lines, now=now, priority=priority, lang=lang, procedure=procedure,
-            skip=skip, skip_facilities=skip_fac, skip_doctors=bad_doctors,
+            skip=skip, skip_facilities=skip_fac, skip_doctors=bad_doctors, anchor=_anchor(rows),
             **prefs,  # type: ignore[arg-type]
         )
 
@@ -307,7 +307,7 @@ async def _citizen_declined(city: City, message: Message, key: str) -> None:
     scadenza; se non ci sono provo le ASST partner e poi propongo la lista d'attesa."""
 
     try:
-        chat = await city.history(need_id=message.need_id)
+        chat = await _case(city, message.need_id)
     except CapError:
         chat = []
     if all(row.msg_id != message.msg_id for row in chat):

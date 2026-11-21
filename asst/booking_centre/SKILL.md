@@ -104,3 +104,22 @@ ogni volta da `city.history(need_id=…)`.
 - **Privacy verso gli altri agenti**: ogni messaggio a un agente passa da `_minimise()`, che toglie codice fiscale, indirizzo, età, disabilità, email e telefono. Restano solo i dati necessari alla prenotazione, e verso le partner solo dopo il consenso.
 - **Mobilità**: la ricevuta indica la distanza approssimativa dal centro del Municipio del cittadino, letto dal token `area.district` (non chiediamo l'indirizzo), e suggerisce metro, tram e bus ATM. Niente API esterne, perché il regolamento ammette solo `city_sdk`.
 - **Accessibilità**: solo se è il cittadino a dirlo ("sono in carrozzina", "mobilità ridotta"…), il booking mette prima le strutture accessibili e lo scrive nella ricevuta usando il dato del registro. Se il registro non lo indica, consiglia di segnalarlo al check-in. Il dato sulla disabilità non viene mai passato alle strutture.
+
+## Correzioni del 21/11, dai percorsi falliti in gara
+
+| Percorso | Problema visto | Correzione |
+|---|---|---|
+| 124, 134 | Il cittadino rifiuta le 3 date con 3 messaggi simultanei "… `cancel offer_id=X reason=deadline`" (la parola `cancel` è a metà frase). Noi rispondevamo "grazie per la scelta" e chiedevamo il consenso | Un `cancel` su un'offerta non ancora confermata è un **rifiuto**, non una scelta. I rifiuti gemelli vengono raccolti (~2,5 s) e il booking risponde **una sola volta**: altre date nei tempi, oppure ASST partner più alternativa reale. Le date rifiutate non vengono riproposte. La parola `cancel` si riconosce ovunque nella frase |
+| 106 | S vuoto: abbiamo solo chiesto il consenso `cross_asst` e poi silenzio → **−1 `no_alternative`** | Nello stesso turno partono la ricerca nelle ASST partner **e** un'alternativa reale (P: lista d'attesa; U/B/D: prime date vere dopo la scadenza). Se il cittadino ripete la richiesta, le offerte gli vengono rimandate invece di restare in silenzio |
+| 110 | Prenotazione corretta (+2, in S_pref), ma l'ospedale non ci ha mandato `booking.receipt` → il cittadino non l'ha mai ricevuta → percorso fallito | Dopo il `confirm` il booking aspetta la ricevuta della struttura. Se non arriva, la chiede al Ledger (`history need_id=…`) e la consegna **solo se c'è un commit registrato** (mai ricevute fantasma). Lo stesso succede se il cittadino rimanda il confirm |
+| review LLM | "Non ha considerato la richiesta di un medico che parla inglese" | Per chi non scrive in italiano, ogni opzione indica le lingue del medico (es. "doctor speaks English, Italian") |
+
+## Alternative dichiarate e chiusura (21/11, dall'analisi del team)
+
+- **Nessuno slot valido nei tempi**: un solo messaggio con offerte reali, raggruppate per vincolo allentato e dette in chiaro:
+  - "con un medico che parla la sua lingua, ma oltre i tempi della ricetta" (es. h1 in inglese lunedì);
+  - "nei tempi della ricetta, ma con un medico che parla italiano" (solo per chi non parla italiano).
+
+  Lista d'attesa solo per la priorità P.
+- **Se il cittadino rifiuta anche queste** (o rifiuta per la seconda volta), il booking chiude con un messaggio gentile, senza insistere e senza prenotare nulla: "posso ricontrollare quando vuole; se i sintomi cambiano, senta il medico".
+- **Scadenza**: ora dell'agenda + N×24 h di calendario (U = entro fine giornata). Esclusi gli slot passati, la riserva urgente delle 09:00 per chi non ha priorità U e gli slot fuori dall'orario 08–18.

@@ -65,7 +65,7 @@ async def _until(
     fresh = chat
     for attempt in range(_PULL_TRIES):
         try:
-            fresh = await city.history(need_id=need_id)
+            fresh = await _case(city, need_id)
         except CapError:
             fresh = chat
         if ready(fresh):
@@ -176,7 +176,8 @@ async def _facility_agent(city: City, facility: str, procedure: str | None) -> s
         for peer in peers:
             if lowered and lowered in peer.agent_id.lower():
                 return peer.agent_id
-    return known or facility
+    # Non restituita dall'Index: non invio dati del cittadino a un id non verificato.
+    return ""
 
 
 def _confirmed_slot(chat: list[Message], agent: str, slot: str) -> str:
@@ -443,10 +444,13 @@ async def _desk(city: City, message: Message, chat: list[Message]) -> None:
                 await _ack(city, message, key, "Grazie, ricevuto: giro subito la ricevuta al cittadino.")
             await _forward_receipt(city, message, chat, key)
         elif heads & {"cancel", "refused", "fault.cancel", "expired"}:
+            if agent_sender and sender not in set(_partners_asked(chat, city.agent_id)) | _confirm_recipients(chat, city.agent_id):
+                _LOG.info("booking.cancel.unbound")
+                return
             if agent_sender:
                 await _ack(city, message, key, "Grazie dell'avviso: aggiorno il cittadino e cerco subito un'alternativa.")
             await _locked(key, lambda: _facility_cancel(city, message, chat, key))
-        elif "offer" in line_heads(text) and agent_sender:
+        elif "offer" in line_heads(text) and agent_sender and sender in set(_partners_asked(chat, city.agent_id)):
             await _ack(city, message, key, "Grazie per la disponibilità: la propongo subito al cittadino.")
             await _locked(key, lambda: _partner_offer(city, message, chat, key))
         elif "need.request" in heads and agent_sender:
@@ -464,6 +468,15 @@ async def _desk(city: City, message: Message, chat: list[Message]) -> None:
 
     # Il cittadino annulla o rinuncia: mai "Fatto" né "grazie per la scelta". Libero il posto
     # presso la struttura e, se la visita gli serve ancora, gli propongo un'alternativa.
+    if _reported_cancel(text):
+        handled: list[bool] = []
+
+        async def reported() -> None:
+            handled.append(await _on_reported_cancel(city, message, chat, key))
+
+        await _locked(key, reported)
+        if handled and handled[0]:
+            return
     if _cancel_intent(text) and _cancel_everything(text) and not fields_of(text).get("offer_id"):
         offers_now = _our_offers(chat, city.agent_id, sender)
         booked = any(

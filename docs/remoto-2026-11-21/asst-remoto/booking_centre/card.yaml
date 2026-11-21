@@ -1,0 +1,21 @@
+agent_id: agent:jgy1dj2sw2ew
+team: team:epica
+name: booking_centre
+version: 1.0.5
+cap_versions:
+  - "1.0"
+profiles:
+  - mhm/1.0
+role: booking_centre
+capabilities:
+  - booking_centre
+no_clinical_advice: true
+languages:
+  - it
+  - en
+accessibility:
+  - plain_language
+  - step_by_step_instructions
+  - text_only_channel
+endpoints:
+  mailbox: agent:jgy1dj2sw2ew
