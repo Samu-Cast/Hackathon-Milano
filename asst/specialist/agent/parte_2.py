@@ -457,8 +457,20 @@ async def _on_confirm(
                 parts += [f"consent_ref={cross}", f"cross_asst_consent_ref={cross}"]
             else:
                 parts.append(f"consent_ref={consent}")
-            if not await _say(city, LEDGER, " ".join(parts)):
+            try:
+                await city.say(LEDGER, " ".join(parts))
+            except Exception as err:  # noqa: BLE001 - CapError (4xx) o errore di trasporto
+                _LOG.warning("hold.fail", extra={"code": str(getattr(err, "code", "") or type(err).__name__)})
+                # 4xx dal Ledger: niente nuovo tentativo, ma il CUP lo sa subito con il motivo.
+                if message.sender.startswith("agent:"):
+                    code = str(getattr(err, "code", "") or "HOLD_REFUSED")
+                    head = f"offer_id={offer_id} " if offer_id else ""
+                    await _say(city, message.sender, f"cancel {head}slot_id={slot} reason={code} code={code}")
                 return
+        if message.sender.startswith("agent:") and message.msg_id not in _ACKED:
+            # Ledger PRIMA del CUP: il "Ricevuto" parte solo dopo l'hold.
+            _ACKED.add(message.msg_id)
+            await _say(city, message.sender, _ACK)
         await _finish_booking(city, message, chat, slot, hold_self=hold_self)
         return
     if not facility or not citizen:
@@ -516,9 +528,9 @@ def _facility_turn(message: Message) -> bool:
     kind = words(message.text)
     if message.sender == LEDGER and head in {"held", "committed", "checked_in", "reported"}:
         return True
-    if message.sender == LEDGER and head == "refused" and "hold" in kind:
+    if message.sender == LEDGER and head == "refused" and {"hold", "commit", "checkin"} & kind:
         return True
-    if _is_checkin(message.text) and message.sender.startswith("citizen:"):
+    if _citizen_checkin(message):
         return True
     return "confirm" in kind and (
         message.sender.startswith("agent:") or message.sender.startswith("citizen:")
@@ -546,13 +558,16 @@ async def _facility(
         await _on_held(city, message, chat)
     elif message.sender == LEDGER and head == "committed":
         await _on_committed(city, message, chat)
-    elif message.sender == LEDGER and head == "refused" and "hold" in kind:
+    elif message.sender == LEDGER and head == "refused" and {"hold", "commit"} & kind:
+        # Hold o commit rifiutato (STALE_FENCE, EXPIRED, NO_CAPACITY, CONSENT_MISSING): cancel al CUP.
         await _on_refused(city, message, chat, hold_self=hold_self)
+    elif message.sender == LEDGER and head == "refused" and "checkin" in kind:
+        await _on_checkin_refused(city, message, chat)
     elif message.sender == LEDGER and head == "checked_in":
         await _on_checked_in(city, message, chat, reports=reports)
     elif message.sender == LEDGER and head == "reported":
         await _on_reported(city, message, chat)
-    elif _is_checkin(message.text) and message.sender.startswith("citizen:"):
+    elif _citizen_checkin(message):
         await _on_checkin(city, message, chat, reports=reports)
     elif "confirm" in kind:
         await _on_confirm(city, message, chat, hold_self=hold_self)
@@ -569,7 +584,13 @@ def _booking_of(chat: list[Message], agent: str, slot_id: str) -> tuple[str, str
         if token not in row.text.split():
             continue
         fields = fields_of(row.text)
-        if "confirm" in words(row.text) and row.sender not in (LEDGER, agent):
+        if (
+            "confirm" in words(row.text)
+            and row.sender not in (LEDGER, agent)
+            and row.sender not in _NOT_DESK
+            and (not sender or row.sender == sender or not sender.startswith("agent:"))
+        ):
+            # Il posto è del PRIMO che conferma (mai di un mittente che l'Index non conosce).
             sender = row.sender
             consent = fields.get("consent_ref", consent)
             number = fields.get("prescription_number") or number
@@ -689,7 +710,7 @@ async def _on_committed(city: City, message: Message, chat: list[Message]) -> No
         or _hold_slot(chat, city.agent_id, fields.get("hold_id", ""))
         or _hold_slot(chat, city.agent_id, booking_id)
     )
-    sender, _, _ = _booking_of(chat, city.agent_id, slot) if slot else ("", "", None)
+    sender = await _owner_of(city, chat, city.agent_id, slot) if slot else ""
     # La ricevuta va a chi ha chiesto la prenotazione (il nostro CUP o quello di un'ASST
     # partner), che la gira al cittadino con quando, dove e cosa fare.
     target = sender or _citizen(chat)
@@ -707,37 +728,49 @@ async def _on_committed(city: City, message: Message, chat: list[Message]) -> No
                 offer_id = fields_of(row.text).get("offer_id", offer_id)
         note = (f" slot_id={slot}" if slot else "") + (f" offer_id={offer_id}" if offer_id else "")
         note += " Prenotazione registrata e firmata sul Ledger, grazie."
-    await _say(city, target, f"booking.receipt booking_id={booking_id} ledger_ref={ledger_ref}{note}")
+    sent = await _say(city, target, f"booking.receipt booking_id={booking_id} ledger_ref={ledger_ref}{note}")
+    citizen = _citizen(chat)
+    if not sent and citizen and citizen != target and not _we(chat, city.agent_id, token, to=citizen, word="booking.receipt"):
+        # Il CUP non è raggiungibile: la ricevuta va al cittadino, così può fare il check-in.
+        await _say(city, citizen, f"booking.receipt booking_id={booking_id} ledger_ref={ledger_ref}{_nota(chat, 'ricevuta')}")
 
 
 async def _on_refused(
     city: City, message: Message, chat: list[Message], *, hold_self: bool
 ) -> None:
+    """Il Ledger rifiuta hold o commit: il CUP che aveva confermato riceve SEMPRE un cancel con il
+    motivo (mai restare muti), una volta sola per slot. Nessun nuovo tentativo (4xx)."""
+
     agent = city.agent_id
-    slot = ""
-    for row in chat:
-        if row.sender == agent and row.recipient == LEDGER and "hold" in words(row.text):
-            slot = fields_of(row.text).get("slot_id", slot)
+    said = fields_of(message.text)
+    slot = said.get("slot_id", "") if first_word(message.text) == "refused" else ""
+    if not slot and said.get("hold_id"):
+        slot = _hold_slot(chat, agent, said["hold_id"])
+    if not slot:
+        for row in chat:
+            if row.sender == agent and row.recipient == LEDGER and first_word(row.text) == "hold":
+                slot = fields_of(row.text).get("slot_id", slot)
     if not slot:
         return
-    target, _, _ = _booking_of(chat, agent, slot)
+    target = await _owner_of(city, chat, agent, slot)
     offer_id = ""
     for row in chat:
-        if f"slot_id={slot}" in row.text.split():
+        if row.sender in (target, agent) and f"slot_id={slot}" in row.text.split():
             offer_id = fields_of(row.text).get("offer_id", offer_id)
-    if (
-        target
-        and offer_id
-        and not _we(chat, agent, f"offer_id={offer_id}", to=target, word="cancel")
+    if target and not _we(chat, agent, f"slot_id={slot}", to=target, word="cancel") and not (
+        offer_id and _we(chat, agent, f"offer_id={offer_id}", to=target, word="cancel")
     ):
         note = _nota(chat, "cancel") if target.startswith("citizen:") else ""
-        # Il codice del Ledger (es. PRESCRIPTION_EXPIRED) dice al CUP cosa fare: rinnovo,
-        # altro slot, consenso. Senza codice resta il motivo generico.
-        code = re.search(r"\b([A-Z][A-Z_]{3,})\b", message.text)
-        reason = code.group(1) if code else "facility_cancelled"
+        # Il codice del Ledger (STALE_FENCE, EXPIRED, NO_CAPACITY, ...) dice al CUP cosa fare.
+        code = said.get("code", "")
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{2,40}", code):
+            hit = re.search(r"\b([A-Z][A-Z_]{3,})\b", message.text)
+            code = hit.group(1) if hit else "facility_cancelled"
+        reason = code
         if reason == "CONSENT_MISSING" and target.startswith("agent:"):
             reason = "rule_p2_no_consent"  # motivo condiviso MACH-1
-        await _say(city, target, f"cancel offer_id={offer_id} slot_id={slot} reason={reason}{note}")
+        offer = f"offer_id={offer_id} " if offer_id else ""
+        await _say(city, target, f"cancel {offer}slot_id={slot} reason={reason} code={code}{note}")
     if hold_self:
         await _advance(city, message, chat, fixed="CONS-GIN", replacing=True)
 
@@ -745,7 +778,11 @@ async def _on_refused(
 async def _on_checkin(city: City, message: Message, chat: list[Message], *, reports: bool) -> None:
     booking_id = fields_of(message.text).get("booking_id", "") or _booking_in(message.text, chat)
     citizen = message.sender if message.sender.startswith("citizen:") else _citizen(chat)
-    if not booking_id or not citizen:
+    if not citizen:
+        return
+    if not booking_id:
+        # Check-in senza numero: mai un rifiuto, chiedo il numero della ricevuta.
+        await _say(city, citizen, _checkin_ask(chat))
         return
     token = f"booking_id={booking_id}"
     if not _we(chat, city.agent_id, token, to=LEDGER, word="checkin"):
@@ -758,6 +795,8 @@ async def _on_checkin(city: City, message: Message, chat: list[Message], *, repo
     reply, fresh = found
     if first_word(reply.text) == "checked_in":
         await _on_checked_in(city, reply, fresh, reports=reports)
+    elif first_word(reply.text) == "refused":
+        await _on_checkin_refused(city, reply, fresh)
 
 
 async def _on_checked_in(

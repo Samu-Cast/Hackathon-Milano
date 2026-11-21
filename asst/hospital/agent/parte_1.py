@@ -57,7 +57,9 @@ _RX = re.compile(r"^prescription_number-[A-Z0-9-]{4,40}$")
 _LOG = logging.getLogger("care")
 # The Relay accepts a ledger reply and then the agent rejects the push, so the reply sits in
 # the case history and never opens a turn. Wait briefly and read it back from history.
+_LEDGER_READ_ONLY = frozenset({"slots", "agenda", "world", "catalogue", "rules", "prescription", "history"})
 _PULL_TRIES = 24
+_HISTORY_BUDGET = 4.0
 _PULL_PAUSE = 0.25
 # Needs whose sent offers this process remembers; the oldest is forgotten first.
 _SENT_NEEDS = 4096
@@ -70,7 +72,11 @@ async def _case(city: City, need_id: str | None) -> list[Message]:
     if not need_id:
         inbound = city.inbound
         return [inbound] if inbound is not None else []
-    return await city.history(need_id=need_id)
+    try:  # una storia lenta non deve far morire il turno (in gara: confirm del CUP senza risposta)
+        return await asyncio.wait_for(city.history(need_id=need_id), timeout=_HISTORY_BUDGET)
+    except Exception as err:  # noqa: BLE001 - lenta o rifiutata: si va avanti col messaggio in ingresso
+        _LOG.warning("care.history.fail", extra={"need_id": need_id[:48], "code": str(getattr(err, "code", "") or type(err).__name__)})
+        return [city.inbound] if city.inbound is not None else []
 
 
 def role_of() -> str:
@@ -93,6 +99,13 @@ async def main(need: Need, city: City) -> None:
     message = city.inbound
     if message is None:
         return
+    if message.sender == LEDGER and first_word(message.text or "") in _LEDGER_READ_ONLY:
+        # Risposte di sola lettura (le legge chi le ha chieste rileggendo la storia): niente turno
+        # lungo, così i confirm del CUP non restano in coda dietro decine di slots/agenda.
+        _remember_ledger(message)
+        return
+    if await _fast_confirm(city, message) or await _fast_ledger(city, message):
+        return  # percorso rapido del nostro CUP: prima di storia, Index e handle
     text = message.text or need.summary
     # Rifiuto solo una vera domanda clinica di un cittadino: un check-in o una conferma che
     # nomina una "diagnosi" va registrato (rifiutarlo costa -2).
@@ -207,6 +220,7 @@ async def handle(role: str, city: City, message: Message, chat: list[Message]) -
         return
     if role in ("hospital", "specialist_care") and message.sender.startswith("agent:"):
         if {"confirm", "cancel"} & words(message.text) and not await _is_desk(city, message.sender):
+            _NOT_DESK.add(message.sender)
             # Confirm e cancel valgono solo da un centro prenotazioni che l'Index restituisce: il
             # ruolo dichiarato nel testo non autentica nessuno.
             _LOG.info("care.confirm.unverified", extra={"need_id": (message.need_id or "")[:48]})
@@ -216,7 +230,10 @@ async def handle(role: str, city: City, message: Message, chat: list[Message]) -
             return
         if "confirm" in words(message.text):
             owner = _slot_owner(chat, city.agent_id, fields_of(message.text).get("slot_id", ""))
-            if owner and owner != message.sender:
+            if owner and owner != message.sender and not await _is_desk(city, owner):
+                _NOT_DESK.add(owner)  # il "primo" era un impostore: il posto resta libero
+                owner = ""
+            if owner and owner != message.sender and _bare(message.sender) not in _OWN_DESKS:
                 # Lo slot è già in mano a un altro centro prenotazioni: nessuna ricevuta, nessun hold.
                 _LOG.info("care.confirm.slot_owned", extra={"need_id": (message.need_id or "")[:48]})
                 return
@@ -224,15 +241,6 @@ async def handle(role: str, city: City, message: Message, chat: list[Message]) -
             # Il CUP di un'altra ASST cerca posti: rispondo con i nostri slot (solo criteri).
             await _serve_partner(city, message, chat, "VIS-FIS" if role == "hospital" else "VIS-CARD")
             return
-        asked = fields_of(message.text)
-        if (
-            "confirm" in words(message.text)
-            and _valid_id(asked.get("slot_id"))
-            and _valid_id(asked.get("consent_ref"))
-            and not _exact(chat, city.agent_id, _ACK)
-        ):
-            # Risposta immediata al CUP, poi hold e commit sul Ledger.
-            await _say(city, message.sender, _ACK)
     if role == "gp":
         await _gp(city, message, chat)
     elif role == "booking_centre":
@@ -248,7 +256,7 @@ async def handle(role: str, city: City, message: Message, chat: list[Message]) -
 # --- livello 3: check-in e lingua detti a parole (squadra epica) --------------------------------
 
 _CHECKIN_RE = re.compile(
-    r"\bcheck[\s-]?in\b|\bsono (?:arrivat[oa]|qui|in sala|allo sportello)\b|\beccomi\b|"
+    r"\bcheck[\s_-]?in\b|\bchecked[\s_-]?in\b|\bsono (?:arrivat[oa]|qui|in sala|allo sportello)\b|\beccomi\b|"
     r"\bi'?m here\b|\bi am here\b|\bi(?: have|'ve) arrived\b|\bje suis (?:là|arrivée?)\b|"
     r"\bestoy aquí\b|\bich bin da\b"
 )
@@ -609,17 +617,31 @@ async def _serve_partner(city: City, message: Message, chat: list[Message], defa
         return
     # MACH-1 e fast-reply: se la risposta richiede più di qualche secondo (pagine del Ledger),
     # prima una conferma di ricezione a parole, senza parola dell'atto.
+    if not any(lang in spec[0] for key, spec in _DOCTORS.items() if key[0] == procedure_key(procedure)):
+        # Nessun nostro medico parla la lingua: rispondo subito, senza sfogliare il Ledger. Il brain
+        # resta libero per i confirm del nostro CUP (in coda arrivavano dopo 60 s: facility_no_reply).
+        await _say(city, message.sender, f"cancel reason=no_availability {tag} procedure={procedure} lang={lang}\n"
+                   "Nessun nostro medico parla questa lingua per la prestazione richiesta. Grazie!")
+        return
     async def _late_ack() -> None:
         await asyncio.sleep(_PARTNER_ACK_AFTER)
         await _say(city, message.sender, "Ricevuto, verifico la disponibilità sul Ledger e vi rispondo subito.")
     ack = asyncio.create_task(_late_ack())
     try:
-        await _serve_partner_slots(city, message, chat, procedure, request_id, priority, lang, want_gender, want_days)
+        await asyncio.wait_for(_serve_partner_slots(
+            city, message, chat, procedure, request_id, priority, lang, want_gender, want_days
+        ), timeout=_PARTNER_BUDGET)
+    except asyncio.TimeoutError:
+        await _say(city, message.sender, f"cancel reason=no_availability {tag} procedure={procedure}\n"
+                   "Non riesco a verificare i posti in tempo utile: per ora nessuna disponibilità. Grazie!")
     finally:
         ack.cancel()
 
 
-_PARTNER_ACK_AFTER = 4.0
+
+_PARTNER_ACK_AFTER = 2.0
+# Tempo massimo per servire una richiesta partner: oltre, il brain blocca i confirm del CUP.
+_PARTNER_BUDGET = 12.0
 # Organico comune a tutte le ASST (kit: «gli stessi medici»). h3 parla anche la lingua rara
 # dell'ASST, che non conosciamo con certezza: per h3 non dichiaro la lingua.
 _DOCTOR_LANG = {"h1": "it/en", "h2": "it", "h3": "it/pt", "s1": "it/en", "s2": "it", "c1": "it/en"}
@@ -638,15 +660,7 @@ async def _serve_partner_slots(
 ) -> None:
     agent = city.agent_id
     tag = f"request_id={request_id}"
-    if not _has_agenda(chat) and not _exact(chat, agent, "agenda"):
-        await _say(city, LEDGER, "agenda")
-    if not _asked(chat, agent, procedure, 1):
-        await _say(city, LEDGER, f"world procedure={procedure} page=1")
-    chat = await _until(
-        city, message.need_id, chat,
-        lambda rows: _has_agenda(rows) and _latest_slots(rows) is not None,
-    )
-    now = _when((_ledger(chat, "agenda") or {}).get("agenda_now", ""))
+    chat, now, cached = await _partner_view(city, message, chat, procedure)
     slots: list[dict[str, str]] = []
     # Gara lunga: le prime pagine sono date passate, salto alla prima con orari futuri.
     for _round in range(16):
@@ -669,7 +683,7 @@ async def _serve_partner_slots(
             break
         limit = None if priority == "U" else now + timedelta(days=_DEADLINE_DAYS.get(priority or "", 14) + 2)
         wanted = _next_page(chat, earliest, limit)
-        if wanted is None:
+        if wanted is None or cached:  # con la cache non sfoglio: il Ledger oggi risponde in minuti
             break
         if not _asked(chat, agent, procedure, wanted):
             await _say(city, LEDGER, f"world procedure={procedure} page={wanted}")
@@ -809,9 +823,15 @@ def _exact(chat: list[Message], agent: str, text: str) -> bool:
 
 
 async def _say(city: City, to: str, text: str) -> bool:
+    """Un invio fallito non fa mai morire il turno: registro il codice (4xx: niente retry)."""
+
     try:
         await city.say(to, text)
-    except CapError:
+    except CapError as err:
+        _LOG.warning("say.fail", extra={"code": getattr(err, "code", ""), "to": to[:64], "head": first_word(text)[:24]})
+        return False
+    except Exception as err:  # noqa: BLE001 - in gara un errore qui fermava hold e commit
+        _LOG.warning("say.fail", extra={"code": type(err).__name__, "to": to[:64], "head": first_word(text)[:24]})
         return False
     return True
 
