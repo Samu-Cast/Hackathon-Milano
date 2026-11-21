@@ -130,6 +130,7 @@ async def _on_choice(
         if offers:
             listed = [
                 f"- {_when_text(offer.get('agenda_date', ''), tone)}: offer_id={offer_id}"
+                f" slot_id={offer['slot_id']}"
                 for offer_id, offer in offers.items()
                 if offer.get("slot_id")
             ]

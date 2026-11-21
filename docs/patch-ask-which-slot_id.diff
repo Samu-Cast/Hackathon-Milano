@@ -1,0 +1,24 @@
+diff --git a/asst/booking_centre/agent/parte_3.py b/asst/booking_centre/agent/parte_3.py
+index c0ffbc4..d4046e2 100644
+--- a/asst/booking_centre/agent/parte_3.py
++++ b/asst/booking_centre/agent/parte_3.py
+@@ -554,6 +554,7 @@ async def _desk(city: City, message: Message, chat: list[Message]) -> None:
+ async def _ask_which(city: City, citizen: str, offers: dict[str, dict[str, str]], tone: str) -> None:
+     listed = [
+         f"- {_when_text(offer.get('agenda_date', ''), tone)}: offer_id={offer_id}"
++        + (f" slot_id={offer['slot_id']}" if offer.get("slot_id") else "")
+         for offer_id, offer in offers.items()
+         if not offer.get("waiting_list")
+     ][-_MAX_OFFERS:]
+diff --git a/asst/family_counseling/agent/parte_2.py b/asst/family_counseling/agent/parte_2.py
+index 9073d34..03ecdb5 100644
+--- a/asst/family_counseling/agent/parte_2.py
++++ b/asst/family_counseling/agent/parte_2.py
+@@ -130,6 +130,7 @@ async def _on_choice(
+         if offers:
+             listed = [
+                 f"- {_when_text(offer.get('agenda_date', ''), tone)}: offer_id={offer_id}"
++                f" slot_id={offer['slot_id']}"
+                 for offer_id, offer in offers.items()
+                 if offer.get("slot_id")
+             ]

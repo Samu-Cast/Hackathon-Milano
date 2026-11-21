@@ -554,6 +554,7 @@ async def _desk(city: City, message: Message, chat: list[Message]) -> None:
 async def _ask_which(city: City, citizen: str, offers: dict[str, dict[str, str]], tone: str) -> None:
     listed = [
         f"- {_when_text(offer.get('agenda_date', ''), tone)}: offer_id={offer_id}"
+        + (f" slot_id={offer['slot_id']}" if offer.get("slot_id") else "")
         for offer_id, offer in offers.items()
         if not offer.get("waiting_list")
     ][-_MAX_OFFERS:]
