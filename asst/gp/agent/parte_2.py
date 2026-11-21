@@ -339,6 +339,15 @@ async def _renew(city: City, message: Message, chat: list[Message], agent: str, 
                 lambda rows: bool((_rx_line(rows, old) or {}).get("procedure")),
             )
             info = _rx_line(chat, old)
+        # Una ricetta si rinnova solo al suo titolare: il Ledger la intesta a lui, oppure (se non
+        # dice di chi è) l'abbiamo emessa noi a lui. Altrimenti la risposta è la stessa di una
+        # ricetta inesistente: niente oracolo e niente contenuto di ricette altrui.
+        if info is not None and info.get("procedure"):
+            owner = info.get("patient") or info.get("citizen") or ""
+            if (owner or await _issued_to(city, agent, citizen, old)) and (not owner or owner == citizen):
+                pass
+            else:
+                info = None
         procedure = (info or {}).get("procedure", "")
         priority = (info or {}).get("priority", "")
         if not procedure or not priority:
@@ -882,3 +891,18 @@ def _latest_hold(chat: list[Message], agent: str) -> tuple[str, str | None]:
     return consent, number
 
 
+
+
+async def _issued_to(city: City, agent: str, citizen: str, number: str) -> bool:
+    """Abbiamo emesso noi ``number`` a ``citizen``? (La nostra mailbox con quel cittadino.)"""
+
+    try:
+        rows = await city.history(citizen)
+    except CapError:
+        return False
+    token = f"prescription_number={number}"
+    return any(
+        row.sender == agent and row.recipient == citizen and first_word(row.text) == "prescription"
+        and token in row.text.split()
+        for row in rows
+    )

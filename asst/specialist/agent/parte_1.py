@@ -63,6 +63,16 @@ _PULL_PAUSE = 0.25
 _SENT_NEEDS = 4096
 
 
+async def _case(city: City, need_id: str | None) -> list[Message]:
+    """La storia di UN caso. Senza need_id city.history(need_id=None) restituisce l'intera
+    mailbox (conformance terminal.exactly_once): in quel caso resta il solo messaggio in ingresso."""
+
+    if not need_id:
+        inbound = city.inbound
+        return [inbound] if inbound is not None else []
+    return await city.history(need_id=need_id)
+
+
 def role_of() -> str:
     """The role this process serves, from ``CITY_ROLE`` or the card next to the brain."""
 
@@ -94,7 +104,7 @@ async def main(need: Need, city: City) -> None:
         and not _is_checkin(text)
     ):
         raise OutOfScope()
-    case = await city.history(need_id=message.need_id)
+    case = await _case(city, message.need_id)
     await handle(role_of(), city, message, case)
 
 
@@ -189,7 +199,27 @@ async def handle(role: str, city: City, message: Message, chat: list[Message]) -
         if "confirm" in words(message.text) and not _is_checkin(message.text):
             await _say(city, message.sender, _via_cup(chat))
             return
+    if role in ("hospital", "specialist_care") and (
+        message.sender.startswith("city:") or message.sender == LEDGER
+    ) and first_word(message.text) in _LOST_HEADS:
+        # Hold scaduto o fault.cancel della città: lo dico a chi aveva confermato, così riprenota.
+        await _on_lost(city, message, chat)
+        return
     if role in ("hospital", "specialist_care") and message.sender.startswith("agent:"):
+        if {"confirm", "cancel"} & words(message.text) and not await _is_desk(city, message.sender):
+            # Confirm e cancel valgono solo da un centro prenotazioni che l'Index restituisce: il
+            # ruolo dichiarato nel testo non autentica nessuno.
+            _LOG.info("care.confirm.unverified", extra={"need_id": (message.need_id or "")[:48]})
+            return
+        if first_word(message.text) == "cancel":
+            await _on_release(city, message, chat)  # il CUP libera un posto che aveva confermato
+            return
+        if "confirm" in words(message.text):
+            owner = _slot_owner(chat, city.agent_id, fields_of(message.text).get("slot_id", ""))
+            if owner and owner != message.sender:
+                # Lo slot è già in mano a un altro centro prenotazioni: nessuna ricevuta, nessun hold.
+                _LOG.info("care.confirm.slot_owned", extra={"need_id": (message.need_id or "")[:48]})
+                return
         if first_word(message.text) == "need.request":
             # Il CUP di un'altra ASST cerca posti: rispondo con i nostri slot (solo criteri).
             await _serve_partner(city, message, chat, "VIS-FIS" if role == "hospital" else "VIS-CARD")
@@ -805,7 +835,7 @@ async def _until(
     fresh = chat
     for attempt in range(_PULL_TRIES):
         try:
-            fresh = await city.history(need_id=need_id)
+            fresh = await _case(city, need_id)
         except CapError:
             fresh = chat
         if ready(fresh):
@@ -830,7 +860,7 @@ async def _await_line(
     fresh = chat
     for attempt in range(_PULL_TRIES):
         try:
-            fresh = await city.history(need_id=need_id)
+            fresh = await _case(city, need_id)
         except CapError:
             fresh = chat
         hit = _latest(fresh, head, token)

@@ -51,6 +51,12 @@ def load_brain(folder: str):
     for attr, value in (("_PULL_PAUSE", 0.001), ("_PULL_TRIES", 6)):
         if hasattr(module, attr):
             setattr(module, attr, value)
+    # hospital e specialist condividono lo stesso brain: il ruolo viene dalla card (CITY_CARD
+    # nel Dockerfile). In test lo fisso dalla card della cartella.
+    card = ROOT / "asst" / folder / "card.yaml"
+    if hasattr(module, "role_of") and hasattr(module, "_card_role") and card.exists():
+        fixed = module._card_role(card.read_text(encoding="utf-8"))
+        module.role_of = lambda fixed=fixed: fixed
     return module
 
 

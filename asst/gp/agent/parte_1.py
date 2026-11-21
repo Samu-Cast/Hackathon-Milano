@@ -133,6 +133,16 @@ _PULL_PAUSE = 0.25
 _SENT_NEEDS = 4096
 
 
+async def _case(city: City, need_id: str | None) -> list[Message]:
+    """La storia di UN caso. Senza need_id city.history(need_id=None) restituisce l'intera
+    mailbox (conformance terminal.exactly_once): in quel caso resta il solo messaggio in ingresso."""
+
+    if not need_id:
+        inbound = city.inbound
+        return [inbound] if inbound is not None else []
+    return await city.history(need_id=need_id)
+
+
 def role_of() -> str:
     """The role this process serves, from ``CITY_ROLE`` or the card next to the brain."""
 
@@ -163,7 +173,7 @@ async def main(need: Need, city: City) -> None:
     # secondo turno vede la ricetta già emessa dal primo.
     lock = _NEED_LOCKS.setdefault(message.need_id or message.msg_id, asyncio.Lock())
     async with lock:
-        case = await city.history(need_id=message.need_id)
+        case = await _case(city, message.need_id)
         await handle(role, city, message, case)
 
 
@@ -356,7 +366,7 @@ async def _until(
     fresh = chat
     for attempt in range(_PULL_TRIES):
         try:
-            fresh = await city.history(need_id=need_id)
+            fresh = await _case(city, need_id)
         except CapError:
             fresh = chat
         if ready(fresh):
@@ -381,7 +391,7 @@ async def _await_line(
     fresh = chat
     for attempt in range(_PULL_TRIES):
         try:
-            fresh = await city.history(need_id=need_id)
+            fresh = await _case(city, need_id)
         except CapError:
             fresh = chat
         hit = _latest(fresh, head, token)
