@@ -337,8 +337,8 @@ def _last_cancel(chat: list[Message], agent: str, citizen: str) -> tuple[int, Me
 
 
 def _replacement_pending(chat: list[Message], agent: str, citizen: str) -> bool:
-    """Abbiamo annullato un'offerta al cittadino (rifiuto del Ledger) e da allora non gli abbiamo
-    più mandato nessuna offerta, e lui non ha rinunciato: le alternative promesse non sono partite."""
+    """Abbiamo annullato un'offerta al cittadino e da allora non gli abbiamo più mandato offerte, e lui
+    non ha rinunciato: le alternative promesse non sono ancora partite."""
 
     index, row = _last_cancel(chat, agent, citizen)
     if row is None:
@@ -451,20 +451,14 @@ async def _advance_alone(
     lines = [line for line in world.splitlines() if "slot_id=" in line]
 
     def fit(**prefs: object) -> list[dict[str, str]]:
-        def run(lead: timedelta | None) -> list[dict[str, str]]:
-            return [
-                slot
-                for slot in fitting(
-                    lines, now=now, priority=None, lang=_lang(chat), facility=agent,
-                    procedure=procedure, lead=lead, **prefs,  # type: ignore[arg-type]
-                )
-                if slot.get("slot_id") not in taken
-            ]
-
-        safe = run(_SAFE_LEAD)
-        ids = {slot["slot_id"] for slot in safe}
-        # Prima gli orari con margine, poi (per arrivare a tre) quelli più vicini.
-        return safe + [slot for slot in run(None) if slot["slot_id"] not in ids]
+        return [
+            slot
+            for slot in fitting(
+                lines, now=now, priority=None, lang=_lang(chat), facility=agent,
+                procedure=procedure, **prefs,  # type: ignore[arg-type]
+            )
+            if slot.get("slot_id") not in taken
+        ]
 
     days = _preferred_days(chat)
     gender = _gender(chat)
@@ -662,12 +656,14 @@ async def _on_held(city: City, message: Message, chat: list[Message]) -> None:
     if not consent:
         _LOG.info("care.held.noconsent", extra={"need_id": need[:48]})
         return
-    parts = [
-        "commit",
-        f"hold_id={hold_id}",
-        f"consent_ref={consent}",
-        f"fence={fields.get('fence', '1')}",
-    ]
+    # Il fence è quello della riga held che ha creato questo hold (il Ledger lo chiama fence o
+    # simile). Non lo indovino con un default: senza, il Ledger risponde STALE_FENCE.
+    fence = next((value for key, value in fields.items() if "fence" in key.lower()), "")
+    if not fence:
+        _LOG.info("care.held.nofence", extra={"need_id": need[:48]})
+    parts = ["commit", f"hold_id={hold_id}", f"consent_ref={consent}"]
+    if fence:
+        parts.append(f"fence={fence}")
     await _say(city, LEDGER, " ".join(parts))
 
 
@@ -770,7 +766,9 @@ async def _on_refused(
             else "Mi dispiace: l'orario scelto non è più disponibile. Non dipende da lei: sto già "
             "cercando un'alternativa."
         )
-        await _say(city, target, f"cancel offer_id={offer_id} reason={reason}\n{prose}")
+        # Al cittadino niente codici interni del Ledger (es. STALE_FENCE): un motivo generico.
+        shown = "facility_unavailable" if target.startswith("citizen:") else reason
+        await _say(city, target, f"cancel offer_id={offer_id} reason={shown}\n{prose}")
         fresh = await city.history(need_id=message.need_id)
         await _advance(city, message, fresh, fixed="CONS-GIN", replacing=True)
 
