@@ -698,7 +698,7 @@ async def _cross_asst(
         deadline = _request_deadline(chat, priority)
         if deadline:
             parts.append(f"deadline={deadline}")
-        parts += _mach_criteria(chat, city.agent_id, citizen)
+        parts += _mach_criteria(chat, city.agent_id, citizen) if _consent_ref(chat, "cross_asst", city.agent_id, citizen) else []  # P2
         text = " ".join(parts) + (
             "\nBuongiorno, il Centro prenotazioni di un'ASST partner cerca disponibilità per "
             "questa prestazione. In questa fase non condividiamo dati del paziente: se avete "
