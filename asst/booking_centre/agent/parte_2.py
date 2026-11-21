@@ -627,7 +627,7 @@ def _speaks(langs: frozenset[str], lang: str) -> bool:
     return lang in langs
 
 
-def _horizon(now: datetime, priority: str | None, extend: bool = True) -> datetime | None:
+def _horizon(now: datetime, priority: str | None, extend: bool = False) -> datetime | None:
     """Scadenza della priorità. ``extend``: conto i giorni di agenda (senza sabato e domenica,
     che nell'agenda non esistono): giovedì + 2 arriva a lunedì invece che a sabato."""
 
@@ -762,8 +762,9 @@ def fitting(
     period: str | None = None,
     skip: set[str] | frozenset[str] = frozenset(),
     skip_facilities: set[str] | frozenset[str] = frozenset(),
-    extend: bool = True,
+    extend: bool = False,
     anchor: datetime | None = None,
+    lead: timedelta | None = None,
     partner: bool = False,
     skip_doctors: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict[str, str]]:
@@ -773,7 +774,7 @@ def fitting(
 
     # La scadenza di priorità corre dal primo contatto del caso (anchor), non da adesso.
     horizon = _horizon(anchor or now, priority, extend)
-    earliest = now + _LEAD
+    earliest = now + (_LEAD if lead is None else lead)
     known = _doctors(lines)
     chosen: list[tuple[datetime, dict[str, str]]] = []
     seen: set[str] = set()

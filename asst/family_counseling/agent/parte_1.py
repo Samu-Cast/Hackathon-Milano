@@ -15,6 +15,9 @@ _MAX_PAGE = 24  # richieste di pagina per turno: ricerca binaria (~8) o lettura 
 
 
 _LEAD = timedelta(hours=4)
+# Preferenza (non obbligo): prima gli orari ad almeno 12 ore di agenda; il cittadino conferma dopo minuti
+# reali (= ore di agenda) e un orario vicino scade prima (EXPIRED, percorso 000266).
+_SAFE_LEAD = timedelta(hours=12)
 
 
 _DOCTORS: dict[str, tuple[frozenset[str], str, frozenset[str]]] = {
@@ -394,6 +397,7 @@ def fitting(
     facility: str | None = None,
     procedure: str | None = None,
     days: frozenset[str] = frozenset(),
+    lead: timedelta | None = None,
 ) -> list[dict[str, str]]:
     """Slots a citizen can accept: future, free, in the priority window, spoken language."""
 
@@ -403,7 +407,7 @@ def fitting(
         horizon = None
     else:
         horizon = now + timedelta(days=_DEADLINE_DAYS.get(priority or "", 14))
-    earliest = now + _LEAD
+    earliest = now + (_LEAD if lead is None else lead)
     chosen: list[tuple[datetime, dict[str, str]]] = []
     for line in lines:
         slot = fields_of(line)

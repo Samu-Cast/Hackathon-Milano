@@ -204,11 +204,15 @@ async def _advance(
 
     def pick(rows: list[Message], **prefs: object) -> list[dict[str, str]]:
         lines, _, _ = _world_lines(rows)
-        return fitting(
-            lines, now=now, priority=priority, lang=lang, procedure=procedure,
+        kw = dict(
+            now=now, priority=priority, lang=lang, procedure=procedure,
             skip=skip, skip_facilities=skip_fac, skip_doctors=bad_doctors, anchor=_anchor(rows),
-            **prefs,  # type: ignore[arg-type]
         )
+        near = fitting(lines, **kw, **prefs)  # type: ignore[arg-type]
+        safe = fitting(lines, lead=_SAFE_LEAD, **kw, **prefs)  # type: ignore[arg-type]
+        ids = {slot["slot_id"] for slot in safe}
+        # Prima gli slot con margine, poi (se servono per arrivare a tre offerte) quelli vicini.
+        return safe + [slot for slot in near if slot["slot_id"] not in ids]
 
     # Pagine da leggere: con la gara lunga (1200 minuti, ~64 giorni di catalogo) le prime pagine
     # sono date passate, quindi salto direttamente a quelle da oggi in poi (_next_page).

@@ -451,14 +451,20 @@ async def _advance_alone(
     lines = [line for line in world.splitlines() if "slot_id=" in line]
 
     def fit(**prefs: object) -> list[dict[str, str]]:
-        return [
-            slot
-            for slot in fitting(
-                lines, now=now, priority=None, lang=_lang(chat), facility=agent,
-                procedure=procedure, **prefs,  # type: ignore[arg-type]
-            )
-            if slot.get("slot_id") not in taken
-        ]
+        def run(lead: timedelta | None) -> list[dict[str, str]]:
+            return [
+                slot
+                for slot in fitting(
+                    lines, now=now, priority=None, lang=_lang(chat), facility=agent,
+                    procedure=procedure, lead=lead, **prefs,  # type: ignore[arg-type]
+                )
+                if slot.get("slot_id") not in taken
+            ]
+
+        safe = run(_SAFE_LEAD)
+        ids = {slot["slot_id"] for slot in safe}
+        # Prima gli orari con margine, poi (per arrivare a tre) quelli più vicini.
+        return safe + [slot for slot in run(None) if slot["slot_id"] not in ids]
 
     days = _preferred_days(chat)
     gender = _gender(chat)

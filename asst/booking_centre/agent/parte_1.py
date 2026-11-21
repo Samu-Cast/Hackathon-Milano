@@ -43,6 +43,9 @@ _LOG = logging.getLogger("booking_centre")
 # Margine tra "adesso" (agenda) e lo slot: l'agenda corre 60x, 90 minuti di agenda sono
 # un minuto e mezzo reale, abbastanza per scelta, hold e commit.
 _LEAD = timedelta(minutes=90)
+# Preferenza (non obbligo): offro prima slot ad almeno 12 ore di agenda. Il cittadino risponde dopo
+# minuti reali (= ore di agenda) e uno slot troppo vicino scade prima della conferma (EXPIRED).
+_SAFE_LEAD = timedelta(hours=12)
 _DEADLINE_DAYS = {"B": 2, "D": 5}
 _MAX_PAGE = 24  # richieste di pagina per turno: ricerca binaria (~8) o lettura in ordine
 _MAX_OFFERS = 3

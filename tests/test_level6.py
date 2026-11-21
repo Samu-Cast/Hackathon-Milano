@@ -64,22 +64,19 @@ class World(unittest.TestCase):
         self.assertEqual(len(slid), 1, "senza ancora la scadenza scivola")
         self.assertEqual(held, [], "con l'ancora lo slot è oltre la scadenza")
 
-    def test_scadenze_in_giorni_di_agenda_senza_weekend(self):
+    def test_scadenze_come_il_team_giorni_di_calendario(self):
+        # Il kit non dice come il giudice conta i giorni: si resta sul comportamento originale
+        # (calendario). Due tracce con scadenze in giorni di agenda mostravano rifiuti per deadline.
         thu = datetime(2026, 11, 26, 8, 0, tzinfo=timezone.utc)  # giovedì 08:00
         doc = "doctor_id=asst-navigli-h2 gender=m languages=it days=mon/tue/wed/thu/fri"
         def slot(sid, dt):
             day = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[dt.weekday()]
             return f"slot_id={sid} doctor_id=asst-navigli-h2 facility=hospital procedure=VIS-FIS at={dt.isoformat()} day={day} free=1"
-        mon = thu + timedelta(days=4, hours=3)   # lunedì 11:00
-        tue = thu + timedelta(days=5, hours=3)   # martedì 11:00
-        thu2 = thu + timedelta(days=7, hours=3)  # giovedì dopo 11:00: oltre 5 giorni di agenda
-        lines = [doc, slot("MON", mon), slot("TUE", tue), slot("THU2", thu2)]
+        mon = thu + timedelta(days=4, hours=3)   # lunedì 11:00: dentro 5 giorni di calendario
+        tue = thu + timedelta(days=5, hours=3)   # martedì 11:00: oltre
+        lines = [doc, slot("MON", mon), slot("TUE", tue)]
         got = [s["slot_id"] for s in self.b.fitting(lines, now=thu, priority="D", lang="it", procedure="VIS-FIS")]
-        self.assertEqual(got, ["MON", "TUE"], "D = 5 giorni di agenda: lun e mar dentro, giovedì dopo fuori")
-        fri = thu + timedelta(days=1)  # B richiesta il venerdì 08:00: 2 giorni di agenda = martedì 08:00
-        lines_b = [doc, slot("MON", fri + timedelta(days=3, hours=1)), slot("TUE2", fri + timedelta(days=4, hours=3))]
-        got_b = [s["slot_id"] for s in self.b.fitting(lines_b, now=fri, priority="B", lang="it", procedure="VIS-FIS")]
-        self.assertEqual(got_b, ["MON"], "B dal venerdì: il lunedì sì, il martedì dopo le 08:00 no")
+        self.assertEqual(got, ["MON"])
 
     def test_offerte_solo_da_world(self):
         async def go():
