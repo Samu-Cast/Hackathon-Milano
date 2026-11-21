@@ -144,17 +144,29 @@ def _red_flag(text: str) -> bool:
     lowered = _norm(text)
     if fields_of(text).get("is_emergency", "").lower() == "true":
         return True
-    return _alarm_text(text, _RED_FLAGS)
+    return any(_flag_present(lowered, flag) for flag in _RED_FLAGS)
+
+
+_NEGATION_BEFORE = re.compile(
+    r"\b(non ho|non ho più|non ho mai|senza|nessun|nessuna|niente|no|not|without|never|mai|"
+    r"ho escluso|escluso|sin|sans|ohne|sem)\b(?:\s+\w+){0,2}\s*$"
+)
+
+
+def _flag_present(lowered: str, flag: str) -> bool:
+    """La red flag compare nel testo e non è negata subito prima ("non ho dolore al petto")."""
+
+    start = lowered.find(flag)
+    while start != -1:
+        if not _NEGATION_BEFORE.search(lowered[max(0, start - 40):start]):
+            return True
+        start = lowered.find(flag, start + 1)
+    return False
 
 
 def _injection(text: str) -> bool:
     lowered = _norm(text)
     return any(marker in lowered for marker in _INJECTION)
-
-
-# Ora di Milano: a novembre-febbraio (la gara) è UTC+1. Il Ledger scrive gli orari in UTC,
-# ma cittadino, fasce 08-18 e confronti devono usare l'ora di Milano.
-_MILAN = timezone(timedelta(hours=1))
 
 
 def _when(value: str) -> datetime | None:
@@ -169,7 +181,7 @@ def _when(value: str) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(_MILAN)
+    return parsed
 
 
 def _day_code(value: str) -> str:
@@ -274,16 +286,17 @@ def _lang(chat: list[Message]) -> str:
     """La lingua del cittadino: il token lang= se c'è; altrimenti quella riconosciuta dal testo
     (livello 3: chi scrive in inglese senza dichiararlo deve avere un medico che parla inglese)."""
 
-    # La lingua del MEDICO: una richiesta esplicita vince sulla lingua in cui il cittadino
-    # scrive o che dichiara (che resta quella della conversazione, vedi _tone).
-    for row in reversed(_from_citizen(chat)):
-        asked = _lang_request(row.text) or _lang_named(row.text)
-        if asked:
-            return asked
+    # Il token lang= è la lingua vera del cittadino (percorso 000238: lang=ar con un testo che
+    # nomina l'inglese; il cittadino ha rifiutato h1 per lingua). Vince sul testo.
     for row in _from_citizen(chat):
         lang = fields_of(row.text).get("lang", "")
         if lang:
             return _lang_code(lang)
+    # Senza token (livello 3, testo libero): vale la lingua chiesta o usata nel testo.
+    for row in reversed(_from_citizen(chat)):
+        asked = _lang_request(row.text) or _lang_named(row.text)
+        if asked:
+            return asked
     for row in _from_citizen(chat):
         found = _detect_lang(row.text)
         if found:
@@ -601,6 +614,8 @@ def _spec(doctor: str, known: dict[str, tuple[frozenset[str], str, frozenset[str
     for name, spec in known.items():
         if name.lower() == doctor.lower() or _doctor_key(name) == key:
             return spec
+    # Il mondo ha sempre la precedenza (sopra). Questo ripiego vale solo per un medico che la
+    # risposta di world non descrive (es. pagina senza la sua riga): coincide con ASST world.
     return _DOCTORS.get(key)
 
 
@@ -612,7 +627,7 @@ def _speaks(langs: frozenset[str], lang: str) -> bool:
     return lang in langs
 
 
-def _horizon(now: datetime, priority: str | None, extend: bool = False) -> datetime | None:
+def _horizon(now: datetime, priority: str | None, extend: bool = True) -> datetime | None:
     """Scadenza della priorità. ``extend``: conto i giorni di agenda (senza sabato e domenica,
     che nell'agenda non esistono): giovedì + 2 arriva a lunedì invece che a sabato."""
 
@@ -747,7 +762,7 @@ def fitting(
     period: str | None = None,
     skip: set[str] | frozenset[str] = frozenset(),
     skip_facilities: set[str] | frozenset[str] = frozenset(),
-    extend: bool = False,
+    extend: bool = True,
     anchor: datetime | None = None,
     partner: bool = False,
     skip_doctors: set[str] | frozenset[str] = frozenset(),

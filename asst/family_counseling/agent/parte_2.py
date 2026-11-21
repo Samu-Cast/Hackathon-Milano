@@ -323,6 +323,36 @@ def _sent(key: str) -> _Sent:
     return entry
 
 
+# Annullamenti per cui le alternative sono già partite (non si rimandano due volte).
+_RESUMED: set[str] = set()
+
+
+def _last_cancel(chat: list[Message], agent: str, citizen: str) -> tuple[int, Message | None]:
+    found: tuple[int, Message | None] = (-1, None)
+    for index, row in enumerate(chat):
+        if (row.sender == agent and row.recipient == citizen and first_word(row.text) == "cancel"
+                and "reason=" in row.text):
+            found = (index, row)
+    return found
+
+
+def _replacement_pending(chat: list[Message], agent: str, citizen: str) -> bool:
+    """Abbiamo annullato un'offerta al cittadino (rifiuto del Ledger) e da allora non gli abbiamo
+    più mandato nessuna offerta, e lui non ha rinunciato: le alternative promesse non sono partite."""
+
+    index, row = _last_cancel(chat, agent, citizen)
+    if row is None:
+        return False
+    for later in chat[index + 1:]:
+        if later.sender == agent and later.recipient == citizen and any(
+            first_word(line) == "offer" for line in later.text.splitlines()
+        ):
+            return False
+        if later.sender == citizen and "cancel" in words(later.text):
+            return False  # il cittadino ha rinunciato dopo il nostro annullamento
+    return True
+
+
 async def _advance(
     city: City,
     message: Message,
@@ -331,9 +361,10 @@ async def _advance(
     fixed: str | None,
     replacing: bool,
     note: str = "",
+    resume: bool = False,
 ) -> None:
     key = message.need_id or message.msg_id
-    await _advance_alone(city, message, chat, key, fixed=fixed, replacing=replacing, note=note)
+    await _advance_alone(city, message, chat, key, fixed=fixed, replacing=replacing, note=note, resume=resume)
 
 
 async def _advance_alone(
@@ -345,6 +376,7 @@ async def _advance_alone(
     fixed: str | None,
     replacing: bool,
     note: str = "",
+    resume: bool = False,
 ) -> None:
     agent = city.agent_id
     citizen = _citizen(chat)
@@ -352,8 +384,14 @@ async def _advance_alone(
         return  # offro solo a un cittadino che ci ha scritto (non a quello di un'ASST partner)
     tone = _tone(chat)
     procedure = "CONS-GIN"
-    if not replacing and (_offered(chat, agent) or _sent(key).offers):
+    if not replacing and not resume and (_offered(chat, agent) or _sent(key).offers):
         return
+    resume_tag = ""
+    if resume:
+        _index, cancelled = _last_cancel(chat, agent, citizen)
+        resume_tag = f"{key}:{cancelled.msg_id}" if cancelled is not None else ""
+        if not resume_tag or resume_tag in _RESUMED:
+            return  # le alternative per questo annullamento sono già partite
     old_replies = {row.msg_id for row in chat} if replacing else set()
 
     def fresh_replies(rows: list[Message]) -> list[Message]:
@@ -434,10 +472,14 @@ async def _advance_alone(
         text = _offers_text(picked, tone=tone, relaxed=relaxed, replacing=replacing, note=note)
         if await _say(city, citizen, text):
             sent.offers.update(slot["slot_id"] for slot in picked)
+            if resume_tag:
+                _RESUMED.add(resume_tag)
+                if len(_RESUMED) > 5000:
+                    _RESUMED.clear()
             if replacing:
                 sent.again.update(slot["slot_id"] for slot in picked)
         return
-    if taken and not replacing:
+    if taken and not replacing and not resume:
         return
     # Nessun orario libero: lo dico chiaramente e propongo la lista d'attesa (alternativa).
     offer_id = f"wl-{key}"
@@ -464,6 +506,8 @@ async def _advance_alone(
         prose + f"\noffer offer_id={offer_id} waiting_list=true procedure={procedure}",
     ):
         sent.offers.add(offer_id)
+        if resume_tag:
+            _RESUMED.add(resume_tag)
 
 
 def _offers_text(
@@ -612,14 +656,12 @@ async def _on_held(city: City, message: Message, chat: list[Message]) -> None:
     if not consent:
         _LOG.info("care.held.noconsent", extra={"need_id": need[:48]})
         return
-    # Il fence è quello della riga held che ha creato questo hold (il Ledger lo chiama fence o
-    # simile). Non lo indovino con un default: senza, il Ledger risponde STALE_FENCE.
-    fence = next((value for key, value in fields.items() if "fence" in key.lower()), "")
-    if not fence:
-        _LOG.info("care.held.nofence", extra={"need_id": need[:48]})
-    parts = ["commit", f"hold_id={hold_id}", f"consent_ref={consent}"]
-    if fence:
-        parts.append(f"fence={fence}")
+    parts = [
+        "commit",
+        f"hold_id={hold_id}",
+        f"consent_ref={consent}",
+        f"fence={fields.get('fence', '1')}",
+    ]
     await _say(city, LEDGER, " ".join(parts))
 
 
@@ -722,9 +764,7 @@ async def _on_refused(
             else "Mi dispiace: l'orario scelto non è più disponibile. Non dipende da lei: sto già "
             "cercando un'alternativa."
         )
-        # Al cittadino niente codici interni del Ledger (es. STALE_FENCE): un motivo generico.
-        shown = "facility_unavailable" if target.startswith("citizen:") else reason
-        await _say(city, target, f"cancel offer_id={offer_id} reason={shown}\n{prose}")
+        await _say(city, target, f"cancel offer_id={offer_id} reason={reason}\n{prose}")
         fresh = await city.history(need_id=message.need_id)
         await _advance(city, message, fresh, fixed="CONS-GIN", replacing=True)
 

@@ -37,6 +37,11 @@ def load_brain(folder: str):
     """Carica asst/<folder>/agent/agent.py come modulo a sé, con le attese accorciate."""
 
     path = ROOT / "asst" / folder / "agent" / "agent.py"
+    # In produzione l'harness imposta CITY_CARD: i brain spezzati (hospital, gp, specialist) leggono
+    # da lì il proprio ruolo. Senza, non fanno nulla e i test non provano niente.
+    import os
+    os.environ["CITY_CARD"] = str(ROOT / "asst" / folder / "card.yaml")
+    os.environ.pop("CITY_ROLE", None)
     name = f"brain_{folder}"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
