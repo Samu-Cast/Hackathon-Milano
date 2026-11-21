@@ -181,7 +181,10 @@ async def _advance(
     offered = _offered_slots(chat, agent, citizen) | {
         slot for slot in sent.offers if not slot.startswith("wl-")
     }
-    if offered and not (replacing or refresh):
+    # Sul tavolo restano solo le offerte ancora aperte: dopo il rifiuto di tutte, un nuovo messaggio del
+    # cittadino fa ripartire la ricerca (niente silenzio, niente stesse offerte già rifiutate).
+    still_open = offered - _cancelled_slots(chat, agent, citizen) - _citizen_cancelled(key)
+    if still_open and not (replacing or refresh):
         if latest is not None and _repeat_request(chat, agent, latest):
             await _resend_offers(city, chat, key, citizen, latest)
             return

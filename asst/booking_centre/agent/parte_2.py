@@ -274,16 +274,16 @@ def _lang(chat: list[Message]) -> str:
     """La lingua del cittadino: il token lang= se c'è; altrimenti quella riconosciuta dal testo
     (livello 3: chi scrive in inglese senza dichiararlo deve avere un medico che parla inglese)."""
 
-    # La lingua del MEDICO: una richiesta esplicita vince sulla lingua in cui il cittadino
-    # scrive o che dichiara (che resta quella della conversazione, vedi _tone).
-    for row in reversed(_from_citizen(chat)):
-        asked = _lang_request(row.text) or _lang_named(row.text)
-        if asked:
-            return asked
+    # Il token lang= è la lingua vera del cittadino (percorso 000238: lang=ar con un testo che nomina
+    # l'inglese; il cittadino ha rifiutato h1 per lingua). Senza token vale la richiesta nel testo.
     for row in _from_citizen(chat):
         lang = fields_of(row.text).get("lang", "")
         if lang:
             return _lang_code(lang)
+    for row in reversed(_from_citizen(chat)):
+        asked = _lang_request(row.text) or _lang_named(row.text)
+        if asked:
+            return asked
     for row in _from_citizen(chat):
         found = _detect_lang(row.text)
         if found:
