@@ -1,7 +1,7 @@
 agent_id: agent:s2tevpn8zkcj
 team: team:epica
 name: specialist
-version: 1.0.5
+version: 1.0.7
 cap_versions:
   - "1.0"
 profiles:
