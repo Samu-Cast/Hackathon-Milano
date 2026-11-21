@@ -137,6 +137,8 @@ async def _handle_turn(need: Need, city: City, message: Message) -> None:
         return
     if sender.startswith("agent:"):
         # Un CUP (di un'altra ASST) cerca posti o conferma uno slot che gli abbiamo offerto.
+        if first_word(message.text) == "need.request":
+            await _say(city, sender, "Grazie, ricevuto: controllo subito i posti liberi del consultorio.")
         case = await city.history(need_id=message.need_id)
         if first_word(message.text) == "need.request":
             await _serve_partner(city, message, case)

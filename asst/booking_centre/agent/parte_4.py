@@ -90,6 +90,8 @@ async def _advance(
     ):
         sent.lines.add("rules")
         await _say(city, LEDGER, "rules")
+    if first_contact:
+        await _prefetch_world(city, chat, sent)
 
     need_new_agenda = fresh_agenda
     chat = await _until(
@@ -100,8 +102,7 @@ async def _advance(
         and _count_ledger(rows, "agenda") > (agendas_before if need_new_agenda else 0),
     )
     status, reply = _prescription_ok(chat, number)
-    agenda = _ledger(chat, "agenda") or {}
-    now = _when(agenda.get("agenda_now") or agenda.get("now") or agenda.get("at") or "")
+    now = _agenda_now(chat)
     if status == "pending":
         return
 
@@ -213,10 +214,11 @@ async def _advance(
     # Pagine da leggere: con la gara lunga (1200 minuti, ~64 giorni di catalogo) le prime pagine
     # sono date passate, quindi salto direttamente a quelle da oggi in poi (_next_page).
     limit = _horizon(now, priority, extend=True)
+    await _prefetch_pages(city, chat, sent, procedure)
     for _round in range(_MAX_PAGE):
         if _has_world(chat) and pick(chat, days=days, gender=gender, period=period):
             break
-        wanted = _next_page(chat, now + _LEAD, limit)
+        wanted = _next_page(chat, now + _lead(priority), limit)
         if wanted is None:
             break
         ask = f"world procedure={procedure} page={wanted}"
@@ -319,9 +321,13 @@ async def _citizen_declined(city: City, message: Message, key: str) -> None:
     citizen = message.sender
     offers = _our_offers(chat, agent, citizen)
     gone = _cancelled_slots(chat, agent, citizen)
+    # Solo le offerte dell'ultimo giro e non ancora passate: quelle vecchie il cittadino non le
+    # rifiuta più, e aspettarle lasciava il CUP muto (24 percorsi falliti su 28 in console, 21/11).
+    current, now = set(_current_offer_ids(chat, agent, citizen)), _agenda_now(chat)
     still_open = [
         oid for oid, offer in offers.items()
-        if not offer.get("waiting_list") and offer.get("slot_id") not in gone
+        if oid in current and not offer.get("waiting_list") and offer.get("slot_id") not in gone
+        and not (now and _offer_at(offer) and _offer_at(offer) <= now)
     ]
     if still_open:
         return
@@ -448,10 +454,10 @@ async def _send_offers(
         tag = f"re:{trigger}"
         if tag in sent.lines:
             return
-        picked = slots[:_MAX_OFFERS]
+        picked = _spread(slots, key)[:_MAX_OFFERS]
     else:
         tag = ""
-        picked = [slot for slot in slots if slot["slot_id"] not in sent.offers][:_MAX_OFFERS]
+        picked = [slot for slot in _spread(slots, key) if slot["slot_id"] not in sent.offers][:_MAX_OFFERS]
     if not picked:
         return
     label = _label(procedure, tone)
@@ -467,7 +473,7 @@ async def _send_offers(
         picked, number=number, priority=priority, procedure=procedure, tone=tone, intro=intro, ids=ids
     )
     if await _say(city, citizen, text):
-        sent.offers.update(slot["slot_id"] for slot in picked)
+        _mark_offered(picked, key, sent)
         if tag:
             sent.lines.add(tag)
 
@@ -529,9 +535,8 @@ async def _beyond_or_release(
     open_slots = _offered_slots(chat, city.agent_id, citizen) - _cancelled_slots(chat, city.agent_id, citizen) - _citizen_cancelled(key)
     if open_slots:
         return  # ci sono offerte ancora aperte: aspetto che il cittadino scelga o rifiuti
-    agenda = _ledger(chat, "agenda") or {}
-    now = _when(agenda.get("agenda_now") or agenda.get("now") or agenda.get("at") or "")
-    if "beyond" not in sent.lines and now is not None and procedure:
+    now = _agenda_now(chat)
+    if now is not None and procedure:  # 21/11: nuovi giri a ogni rifiuto, il ciclo chiude solo il cittadino
         need_id = next((row.need_id for row in reversed(chat) if row.need_id), None)
         agent = city.agent_id
         for _round in range(4):  # qualche pagina in più: le date oltre la scadenza stanno dopo
@@ -556,7 +561,7 @@ async def _beyond_or_release(
         # Seconda alternativa: entro la scadenza, allentando la lingua del medico (se ne aveva
         # chiesta una diversa dall'italiano). Le due vanno nello stesso messaggio.
         doctor_lang = _lang(chat)
-        horizon = _horizon(now, priority)
+        horizon = _horizon(_anchor(chat) or now, priority)
         still_in_time = [slot for slot in later_slots if horizon is None or (_when(slot["at"]) or now) < horizon]
         if still_in_time:
             # Trovate solo leggendo altre pagine, ma ENTRO la scadenza: offerte normali, senza
@@ -580,6 +585,7 @@ async def _beyond_or_release(
                     lines, now=now, priority=priority, lang=code, procedure=procedure,
                     skip=skip | {slot["slot_id"] for slot in later_slots},
                     skip_facilities=_unreachable(chat, agent), skip_doctors=bad_doctors,
+                    anchor=_anchor(chat),
                 )
                 if in_time:
                     alt_lang = code
@@ -594,7 +600,7 @@ async def _beyond_or_release(
                 intro_text=intro,
             )
             return
-    await _release(city, key, citizen, number, tone)
+    await _keep_searching(city, key, citizen, tone, len(_our_offers(chat, city.agent_id, citizen)))
 
 
 async def _release(city: City, key: str, citizen: str, number: str | None, tone: str) -> None:
@@ -675,7 +681,7 @@ async def _cross_asst(
         and (service in peer.capabilities or peer.service == service)
     ]
     # MACH-1: prima le strutture pubblicate dalle squadre (e quella con la lingua rara chiesta).
-    partners = _ranked_partners(partners, _lang(chat))[:_MAX_PARTNERS]
+    partners = _lang_partners(partners, _lang(chat))
     if not partners:
         return False
     sent.flags.add("cross")
@@ -700,6 +706,7 @@ async def _cross_asst(
         )
         if await _say(city, peer.agent_id, text):
             reached += 1
+            break  # 21/11: una sola partner (la prima raggiungibile): le altre erano il 55% della coda
     if reached == 0:
         return False
     prose = tr("cross_search", tone, label=_label(procedure, tone))
@@ -754,8 +761,7 @@ async def _partner_offer(city: City, message: Message, chat: list[Message], key:
         return
     priority = (reply.get("priority") or "").upper() or None
     procedure = reply.get("procedure")
-    agenda = _ledger(chat, "agenda") or {}
-    now = _when(agenda.get("agenda_now") or agenda.get("now") or "")
+    now = _agenda_now(chat)
     if now is None:
         return
     lines = []
@@ -773,7 +779,7 @@ async def _partner_offer(city: City, message: Message, chat: list[Message], key:
     if message.sender in _own_facilities(world) or message.sender in _team_facilities().values():
         return
     usable = fitting(lines, now=now, priority=priority, lang=_lang(chat), procedure=procedure,
-                     skip=_cancelled_slots(chat, city.agent_id, citizen))
+                     skip=_cancelled_slots(chat, city.agent_id, citizen), anchor=_anchor(chat))
     # La facility partner deve restare quella che ha offerto lo slot.
     for slot in usable:
         slot["facility"] = message.sender
@@ -810,15 +816,14 @@ async def _serve_partner(city: City, message: Message, chat: list[Message], key:
         city, message.need_id, chat,
         lambda rows: _has_world(rows) and _ledger(rows, "agenda") is not None,
     )
-    agenda = _ledger(chat, "agenda") or {}
-    now = _when(agenda.get("agenda_now") or agenda.get("now") or "")
+    now = _agenda_now(chat)
     for _round in range(_MAX_PAGE):
         if now is None or priority == "P":
             break
         lines, _, _ = _world_lines(chat)
         if fitting(lines, now=now, priority=priority, lang=fields.get("lang", "it"), procedure=procedure):
             break
-        wanted = _next_page(chat, now + _LEAD, _horizon(now, priority, extend=True))
+        wanted = _next_page(chat, now + _lead(priority), _horizon(now, priority, extend=True))
         if wanted is None:
             break
         ask = f"world procedure={procedure} page={wanted}"
@@ -980,7 +985,7 @@ async def _on_confirm(
         "\nBuongiorno, il cittadino ha scelto questo slot: vi chiediamo di bloccarlo e "
         "confermarlo sul Ledger. Grazie!"
     )
-    target = await _facility_agent(city, facility, offer.get("procedure"))
+    target = await _confirm_target(city, facility, offer.get("procedure"), slot, key)
     code = await _say_or_code(city, target, text)
     if code:
         # 4xx (es. TARGET_NOT_VISIBLE): nessun nuovo tentativo. Avviso e propongo altro.

@@ -40,14 +40,22 @@ _LOG = logging.getLogger("booking_centre")
 
 # --- costanti ------------------------------------------------------------------------------------
 
-# Margine tra "adesso" (agenda) e lo slot: l'agenda corre 60x, 90 minuti di agenda sono
-# un minuto e mezzo reale, abbastanza per scelta, hold e commit.
-_LEAD = timedelta(minutes=90)
+# Margine tra "adesso" (agenda) e lo slot: l'agenda corre 60x. Misurato in console il 21/11:
+# con 90 minuti "reason=past" era il rifiuto più frequente (152 su 370); l'offerta partiva
+# ~1,7 h prima dello slot e il cittadino risponde 1,2-1,8 h dopo, poi servono hold e commit.
+_LEAD = timedelta(hours=4)
+# Priorità U (in giornata): con l'ora di agenda aggiornata (_agenda_now) bastano 90 minuti,
+# altrimenti gli slot urgenti dello stesso giorno non verrebbero mai offerti.
+_LEAD_U = timedelta(minutes=90)
+
+
+def _lead(priority: str | None) -> timedelta:
+    return _LEAD_U if (priority or "").upper() == "U" else _LEAD
 _DEADLINE_DAYS = {"B": 2, "D": 5}
 _MAX_PAGE = 24  # richieste di pagina per turno: ricerca binaria (~8) o lettura in ordine
 _MAX_OFFERS = 3
-_MAX_PARTNERS = 4
-_PULL_TRIES = 24
+_MAX_PARTNERS = 2  # 21/11: con 4 i 2/3 dei messaggi del CUP andavano alle partner (offerte e ack)
+_PULL_TRIES = 3  # 21/11: con 24 riletture un turno durava ~60 s e il pod ne smaltiva 6/min (285 messaggi mai consegnati); la risposta del Ledger arriva comunque come turno a sé
 _PULL_PAUSE = 0.25
 _SENT_NEEDS = 4096
 _MAX_TEXT = 2000

@@ -141,8 +141,7 @@ async def _on_citizen_cancel(city: City, message: Message, chat: list[Message], 
     status, reply = _prescription_ok(chat, number) if number else ("", {})
     if status != "ok" or (reply.get("priority") or "").upper() == "P":
         return
-    agenda = _ledger(chat, "agenda") or {}
-    now = _when(agenda.get("agenda_now") or agenda.get("now") or "")
+    now = _agenda_now(chat)
     lines, _, _ = _world_lines(chat)
     if now is None or not lines:
         return
@@ -151,7 +150,7 @@ async def _on_citizen_cancel(city: City, message: Message, chat: list[Message], 
     options = fitting(
         lines, now=now, priority=priority, lang=_lang(chat), procedure=procedure,
         skip=_citizen_cancelled(key) | _cancelled_slots(chat, agent, citizen),
-        skip_facilities=_unreachable(chat, agent),
+        skip_facilities=_unreachable(chat, agent), anchor=_anchor(chat),
     )[:_MAX_OFFERS]
     if not options:
         return
@@ -378,3 +377,137 @@ def _own_street(city: City) -> str:
         return Path(__file__).with_name("door.txt").read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+# --- ora dell'agenda "invecchiata" (21/11, dai percorsi in console) ----------------------------
+# La risposta "agenda" del Ledger resta nella storia del caso e viene riusata per tutto il caso.
+# L'agenda corre 60x: una risposta vecchia di 5 minuti reali è indietro di 5 ore, e il CUP
+# offriva slot già passati (reason=past, il rifiuto più frequente). Sommo il tempo reale passato
+# da quella risposta, moltiplicato per il ritmo dell'agenda. Senza sent_at resta com'era.
+_AGENDA_RATE = 60.0
+_AGENDA_MAX_AGE = timedelta(hours=24)
+
+
+def _agenda_now(chat: list[Message]) -> datetime | None:
+    row = None
+    for item in chat:
+        if item.sender == LEDGER and first_word(item.text) == "agenda":
+            row = item
+    if row is None:
+        return None
+    fields = fields_of(row.text)
+    now = _when(fields.get("agenda_now") or fields.get("now") or fields.get("at") or "")
+    if now is None:
+        return None
+    try:
+        sent = datetime.fromisoformat((getattr(row, "sent_at", "") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return now
+    if sent.tzinfo is None:
+        sent = sent.replace(tzinfo=timezone.utc)
+    real = datetime.now(timezone.utc) - sent
+    if real <= timedelta(0):
+        return now
+    return now + min(real * _AGENDA_RATE, _AGENDA_MAX_AGE)
+
+
+# --- primo giro unico col Ledger (21/11, dai messaggi in console) -------------------------------
+# Ogni andata e ritorno col Ledger costa ~7 minuti reali (~7 ore di agenda). Il CUP faceva 3-4 giri
+# in fila (ricetta, poi pagina 1, poi pagina 4...) e il cittadino aspettava 15-25 minuti. Al primo
+# contatto chiedo subito anche le prime pagine del catalogo (in ordine di data: ~2 giorni a
+# pagina), così le offerte partono dopo un giro solo. Solo per la fisiatria: è l'unico servizio con
+# una procedura sola, e le risposte "slots" non dicono a quale procedura appartengono.
+_PREFETCH = {"hospital.physiatry": "VIS-FIS"}
+_PREFETCH_PAGES = (1, 2)  # 21/11: ogni pagina è un turno in coda; 2 coprono ~4 giorni
+
+
+async def _prefetch_world(city: City, chat: list[Message], sent) -> None:
+    if _has_world(chat):
+        return
+    service = next(
+        (fields_of(row.text).get("service_type", "") for row in _from_citizen(chat) if "service_type=" in row.text),
+        "",
+    )
+    procedure = _PREFETCH.get(service)
+    if not procedure or f"prefetch:{procedure}" in sent.lines:
+        return
+    sent.lines.add(f"prefetch:{procedure}")
+    for page in _PREFETCH_PAGES:
+        await _say(city, LEDGER, f"world procedure={procedure} page={page}")
+
+
+async def _prefetch_pages(city: City, chat: list[Message], sent, procedure: str | None) -> None:
+    """Con la procedura nota (dalla ricetta) e nessuna pagina ancora letta: pagine 2-3 insieme alla 1,
+    in un giro solo, invece di una alla volta (vale anche per la cardiologia)."""
+
+    if not procedure or _has_world(chat) or f"prefetch:{procedure}" in sent.lines:
+        return
+    sent.lines.add(f"prefetch:{procedure}")
+    asked = {row.text.strip() for row in _ours(chat, city.agent_id, LEDGER)}
+    for page in _PREFETCH_PAGES[1:]:  # la pagina 1 la chiede subito dopo il ciclo di _advance
+        ask = f"world procedure={procedure} page={page}"
+        if ask not in asked:
+            await _say(city, LEDGER, ask)
+
+
+# --- stesso slot a più cittadini (21/11, report di ospedale e specialista) ----------------------
+# Ogni cittadino riceveva gli slot più vicini: alle 11:37 cinque confirm per lo stesso slot h2 in
+# 4 secondi, vince solo il primo (gli altri SLOT_TAKEN). Uno slot già confermato per un altro caso
+# non lo offro più; quelli appena offerti ad altri li metto in fondo (mai tolti: restano se servono).
+_SLOT_CONFIRMED: dict[str, tuple[str, datetime]] = {}
+_SLOT_OFFERED: dict[str, tuple[str, datetime]] = {}
+_CONFIRMED_TTL = timedelta(minutes=30)
+_OFFERED_TTL = timedelta(minutes=10)
+
+
+def _recent(table: dict[str, tuple[str, datetime]], key: str, ttl: timedelta) -> set[str]:
+    now = datetime.now(timezone.utc)
+    for slot in [s for s, (_, at) in table.items() if now - at > ttl]:
+        table.pop(slot, None)
+    return {slot for slot, (owner, _) in table.items() if owner != key}
+
+
+def _spread(slots: list[dict[str, str]], key: str) -> list[dict[str, str]]:
+    taken = _recent(_SLOT_CONFIRMED, key, _CONFIRMED_TTL)
+    busy = _recent(_SLOT_OFFERED, key, _OFFERED_TTL)
+    free = [slot for slot in slots if slot.get("slot_id") not in taken]
+    return sorted(free, key=lambda slot: slot.get("slot_id") in busy)  # stabile: l'ordine resta
+
+
+def _mark_offered(picked: list[dict[str, str]], key: str, sent) -> None:
+    sent.offers.update(slot["slot_id"] for slot in picked)
+    now = datetime.now(timezone.utc)
+    for slot in picked:
+        _SLOT_OFFERED.setdefault(slot["slot_id"], (key, now))
+
+
+async def _confirm_target(city: City, facility: str, procedure: str | None, slot: str, key: str) -> str:
+    _SLOT_CONFIRMED[slot] = (key, datetime.now(timezone.utc))
+    return await _facility_agent(city, facility, procedure)
+
+
+# --- il ciclo col cittadino non si ferma (21/11) -------------------------------------------------
+# Il CUP chiudeva con "cancel reason=released" quando non trovava altre date. Il ciclo finisce solo
+# se il cittadino prenota o annulla lui: qui dico che continuo a cercare e lascio la porta aperta.
+# Un solo messaggio per giro di rifiuti (chiave = numero di offerte già mandate).
+_KEEP_SEARCHING = {
+    "it": "Al momento non vedo altre date libere adatte: continuo a cercare e le scrivo non appena se ne libera una. Se preferisce può annullare la richiesta in qualsiasi momento, oppure indicarmi altri giorni.",
+    "en": "I do not see other suitable free dates right now: I am still searching and I will write to you as soon as one opens up. You can drop the request at any time, or tell me other days that suit you.",
+    "es": "Ahora mismo no veo otras fechas libres adecuadas: sigo buscando y le escribo en cuanto haya una. Puede anular la solicitud cuando quiera o indicarme otros días.",
+    "fr": "Je ne vois pas d'autres dates libres adaptées pour le moment : je continue à chercher et je vous écris dès qu'une se libère. Vous pouvez annuler la demande à tout moment ou m'indiquer d'autres jours.",
+    "pt": "De momento não vejo outras datas livres adequadas: continuo a procurar e escrevo-lhe assim que surgir uma. Pode anular o pedido a qualquer momento ou indicar-me outros dias.",
+    "de": "Im Moment sehe ich keine weiteren passenden freien Termine: Ich suche weiter und schreibe Ihnen, sobald einer frei wird. Sie können die Anfrage jederzeit abbrechen oder mir andere Tage nennen.",
+}
+
+
+async def _keep_searching(city: City, key: str, citizen: str, tone: str, round_no: int) -> None:
+    await _once(city, key, f"keep-searching:{round_no}", citizen, _KEEP_SEARCHING.get(tone, _KEEP_SEARCHING["en"]))
+
+
+# --- ASST partner solo per la lingua rara (21/11, coda del CUP) ---------------------------------
+# Il CUP elaborava ~11 messaggi al minuto e ne riceveva ~32: metà della coda erano richieste,
+# offerte e "ack" delle partner, che da stamattina non hanno dato nessuna prenotazione (0 consensi
+# cross_asst su 24, slot quasi sempre oltre la scadenza). Chiedo a UNA partner solo se è l'ASST
+# della lingua rara del cittadino; altrimenti si passa subito all'alternativa reale (date vere).
+def _lang_partners(peers: list, lang: str) -> list:
+    return [peer for peer in _ranked_partners(peers, lang) if _partner_rank(peer.agent_id, lang) == 0][:1]

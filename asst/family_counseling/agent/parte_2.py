@@ -265,9 +265,15 @@ async def _partner_confirm(city: City, message: Message, case: list[Message]) ->
     agent = city.agent_id
     fields = fields_of(message.text)
     slot = fields.get("slot_id", "")
-    consent = fields.get("consent_ref", "")
+    # Regola P2: l'hold in un'altra ASST vale solo col consenso cross_asst del cittadino. Se il CUP
+    # partner lo manda a parte (cross_asst_consent_ref), è quello che va al Ledger.
+    consent = fields.get("cross_asst_consent_ref") or fields.get("consent_ref", "")
     citizen = fields.get("citizen", "")
     if not slot or not _valid_ref(consent):
+        return
+    # Livello 8: una conferma vale solo dall'agente a cui questo caso ha offerto lo slot.
+    if not _we(case, agent, f"slot_id={slot}", to=message.sender, word="offer"):
+        _LOG.info("care.confirm.unbound")
         return
     ack = "Ricevuto, grazie: blocco subito il posto sul Ledger e vi mando la conferma firmata."
     if not _exact(case, agent, ack):

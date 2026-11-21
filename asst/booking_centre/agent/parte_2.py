@@ -31,11 +31,20 @@ def tr(key: str, lang: str, **kwargs: object) -> str:
 # --- ingresso ------------------------------------------------------------------------------------
 
 
+_FAST_ACK_HEADS = {"offer", "cancel", "booking.receipt", "need.request", "refused", "fault.cancel"}
+_FAST_ACK_TEXT = "Grazie, ricevuto: ci lavoro subito e vi aggiorno."
+_AGENT_ACTS = _FAST_ACK_HEADS | {"confirm", "expired", "data.request", "consent", "escalate.emergency"}
+
+
 async def main(need: Need, city: City) -> None:
     message = city.inbound
     if message is None:
         return
     if message.sender == city.agent_id:
+        return
+    # Coda (21/11): il 57% dei messaggi in ingresso erano "ack"/"Ricevuto" delle partner, ognuno un
+    # turno con lettura della storia. Un messaggio d'agente senza nessun atto lo chiudo subito.
+    if message.sender.startswith("agent:") and not ((line_heads(message.text or "") | words(message.text or "")) & _AGENT_ACTS):
         return
     text = message.text or need.summary or ""
 
@@ -56,6 +65,11 @@ async def main(need: Need, city: City) -> None:
         and not _has_booking_tokens(text)
     ):
         raise OutOfScope()
+
+    # Fast-reply (+1 city:clock entro ~10 s): a un altro agente rispondo subito, prima di leggere
+    # la storia del caso. Stessa chiave di _ack in _desk, quindi non parte un secondo messaggio.
+    if message.sender.startswith("agent:") and line_heads(message.text) & _FAST_ACK_HEADS:
+        await _ack(city, message, message.need_id or message.msg_id, _FAST_ACK_TEXT)
 
     try:
         chat = await _case(city, message.need_id)
@@ -758,7 +772,7 @@ def fitting(
 
     # La scadenza di priorità corre dal primo contatto del caso (anchor), non da adesso.
     horizon = _horizon(anchor or now, priority, extend)
-    earliest = now + _LEAD
+    earliest = now + _lead(priority)
     known = _doctors(lines)
     chosen: list[tuple[datetime, dict[str, str]]] = []
     seen: set[str] = set()
@@ -924,11 +938,28 @@ _PII = re.compile(
 
 
 
+def _iso(value: object) -> datetime | None:
+    try:
+        stamp = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
 def _anchor(chat: list[Message]) -> datetime | None:
-    """La prima ora di agenda letta nel caso: da lì corre la scadenza anche dopo un annullamento."""
+    """Quando è nato il caso, in ora di agenda: da lì corre la scadenza (U in giornata, B 2 giorni,
+    D 5), anche dopo un annullamento. Il cittadino la conta dal suo primo messaggio, non da quando
+    il CUP legge l'agenda (21/11: 7 minuti reali = 7 ore di agenda di scarto, e i rifiuti
+    reason=deadline su slot che noi davamo "entro i tempi"). Senza orari di invio resta la lettura."""
+
     for row in chat:
         if row.sender == LEDGER and first_word(row.text) == "agenda":
             found = _when(fields_of(row.text).get("agenda_now", ""))
-            if found is not None:
+            if found is None:
+                continue
+            first = next((r for r in chat if r.sender.startswith("citizen:") and _iso(getattr(r, "sent_at", ""))), None)
+            replied, asked = _iso(getattr(row, "sent_at", "")), _iso(getattr(first, "sent_at", "") if first else "")
+            if replied is None or asked is None or replied <= asked:
                 return found
+            return found - min((replied - asked) * 60, timedelta(hours=36))
     return None

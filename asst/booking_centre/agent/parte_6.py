@@ -122,7 +122,7 @@ def _request_deadline(chat: list[Message], priority: str | None) -> str:
     now = _when(agenda.get("agenda_now") or agenda.get("now") or "")
     if now is None or priority in (None, "P"):
         return ""
-    horizon = _horizon(now, priority)
+    horizon = _horizon(_anchor(chat) or now, priority)
     return horizon.isoformat() if horizon else ""
 
 
@@ -133,8 +133,7 @@ def _partner_candidates(
 
     number = _number(chat)
     status, reply = _prescription_ok(chat, number) if number else ("pending", {})
-    agenda = _ledger(chat, "agenda") or {}
-    now = _when(agenda.get("agenda_now") or agenda.get("now") or "")
+    now = _agenda_now(chat)
     if status != "ok" or now is None:
         return [], False
     priority = (reply.get("priority") or "").upper() or None
@@ -148,7 +147,7 @@ def _partner_candidates(
     days, gender, _ = _preferences(chat, agent, citizen)
     period = _period(chat, agent, citizen)
     common = dict(now=now, priority=priority, lang=_lang(chat), procedure=procedure, skip=skip, partner=True,
-                  skip_doctors=_rejected_doctors(chat, agent, citizen))
+                  skip_doctors=_rejected_doctors(chat, agent, citizen), anchor=_anchor(chat))
     strict = fitting(lines, days=days, gender=gender, period=period, **common)
     if strict or not (days or gender or period):
         return strict, False
@@ -498,6 +497,7 @@ for _asst, _ids in (
     ("bovisa", "vgtmj5nqfkxj h82xpx3rkn9e gxq3vzgt3h5t tty8erdj6t41 txar5994gbkj"),
     ("lorenteggio", "qtjne8symjas w2qsptc9qqhg tmt0bcv0st1f n9bf9y6670hp mcppmrbjvxag"),
     ("isola", "etpwrfmfa8hm mkfzagfe8jtt"),
+    ("gorla", "sbdpbpqz5sxe m6py14a1ej77 h6krzxx6es83 yg8debxe3x0p"),  # alleanza the-promptfather-s, 21/11
 ):
     for _id in _ids.split():
         _TRUSTED_ASST[f"agent:{_id}"] = _asst
