@@ -1,7 +1,7 @@
-agent_id: agent:bdmy1m646zm8
+agent_id: agent:dn90g1skkx0f
 team: team:epica
 name: gp
-version: 1.0.0
+version: 1.0.1
 cap_versions:
   - "1.0"
 profiles:
@@ -11,4 +11,4 @@ capabilities:
   - gp
 no_clinical_advice: true
 endpoints:
-  mailbox: agent:bdmy1m646zm8
+  mailbox: agent:dn90g1skkx0f
