@@ -46,6 +46,8 @@ async def main(need: Need, city: City) -> None:
     # turno con lettura della storia. Un messaggio d'agente senza nessun atto lo chiudo subito.
     if message.sender.startswith("agent:") and not ((line_heads(message.text or "") | words(message.text or "")) & _AGENT_ACTS):
         return
+    if _unasked_offer(message):
+        return  # niente "ricevuto" né turno: era un ping-pong che riempiva la coda
     text = message.text or need.summary or ""
 
     # Emergenza dichiarata dall'harness o dal need: ci si ferma e si escala.

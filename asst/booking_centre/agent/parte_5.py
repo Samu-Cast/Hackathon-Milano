@@ -509,5 +509,22 @@ async def _keep_searching(city: City, key: str, citizen: str, tone: str, round_n
 # offerte e "ack" delle partner, che da stamattina non hanno dato nessuna prenotazione (0 consensi
 # cross_asst su 24, slot quasi sempre oltre la scadenza). Chiedo a UNA partner solo se è l'ASST
 # della lingua rara del cittadino; altrimenti si passa subito all'alternativa reale (date vere).
+_ASKED_PARTNERS: set[str] = set()
+
+
 def _lang_partners(peers: list, lang: str) -> list:
-    return [peer for peer in _ranked_partners(peers, lang) if _partner_rank(peer.agent_id, lang) == 0][:1]
+    chosen = [peer for peer in _ranked_partners(peers, lang) if _partner_rank(peer.agent_id, lang) == 0][:1]
+    _ASKED_PARTNERS.update(_bare_id(peer.agent_id) for peer in chosen)
+    return chosen
+
+
+def _unasked_offer(message: Message) -> bool:
+    """Offerta da un agente a cui questo processo non ha chiesto posti (21/11: agent:pky3vqyqbepa
+    rimandava le stesse offerte a ogni nostro "ricevuto", 198 messaggi in coda davanti ai cittadini)."""
+
+    return (
+        message.sender.startswith("agent:")
+        and first_word(message.text or "") == "offer"
+        and _bare_id(message.sender) not in _ASKED_PARTNERS
+        and message.sender not in _team_facilities().values()
+    )
