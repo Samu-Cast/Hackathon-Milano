@@ -1,7 +1,7 @@
 agent_id: agent:jgy1dj2sw2ew
 team: team:epica
 name: booking_centre
-version: 1.0.11
+version: 1.0.12
 cap_versions:
   - "1.0"
 profiles:
