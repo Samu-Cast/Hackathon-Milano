@@ -79,7 +79,8 @@ class Recupero(unittest.TestCase):
             t.delay = True
             await t.send(C1, FC, f"confirm offer_id={offers[0]} consent_ref=cons-N-1-booking", need_id="N-1")
             cancels = t.said(C1, "cancel")
-            self.assertTrue(any("reason=STALE_FENCE" in c for c in cancels), cancels)
+            # Al cittadino il consultorio non mostra codici interni del Ledger: motivo generico.
+            self.assertTrue(any("reason=facility_unavailable" in c or "reason=STALE_FENCE" in c for c in cancels), cancels)
             before = [l for x in t.said(C1, "offer") for l in x.splitlines() if l.startswith("offer ")]
             t.ledger.stale = False
             await release(t)

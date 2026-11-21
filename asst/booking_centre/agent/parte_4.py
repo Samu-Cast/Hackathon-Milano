@@ -80,15 +80,15 @@ async def _advance(
     trigger = _trigger(message) if (replacing or refresh) else ""
     asked_agenda = any(row.text.strip() == "agenda" for row in _ours(chat, agent, LEDGER))
     fresh_agenda = bool(trigger) and f"agenda:{trigger}" not in sent.lines
-    if (not asked_agenda and "agenda" not in sent.lines) or fresh_agenda:
+    if ((not asked_agenda and "agenda" not in sent.lines) or fresh_agenda) and not _shared_fresh("agenda"):
         sent.lines.add("agenda")
         if trigger:
             sent.lines.add(f"agenda:{trigger}")
         await _say(city, LEDGER, "agenda")
-    if "rules" not in sent.lines and not any(
-        row.text.strip() == "rules" for row in _ours(chat, agent, LEDGER)
-    ):
-        sent.lines.add("rules")
+    if (trigger and f"rules:{trigger}" not in sent.lines and not _shared_fresh("rules", _RULES_EVERY)) or ("rules" not in sent.lines and not _shared_fresh("rules") and not any(
+        row.text.strip() == "rules" for row in _ours(chat, agent, LEDGER)  # a ogni nuovo giro rileggo le regole (P1/P2/P3)
+    )):
+        sent.lines.update({"rules", f"rules:{trigger}"})
         await _say(city, LEDGER, "rules")
     if first_contact:
         await _prefetch_world(city, chat, sent)
@@ -101,10 +101,10 @@ async def _advance(
         lambda rows: _prescription_ok(rows, number)[0] != "pending"
         and _count_ledger(rows, "agenda") > (agendas_before if need_new_agenda else 0),
     )
-    status, reply = _prescription_ok(chat, number)
+    status, reply = _prescription_or_provisional(chat, number)  # provvisoria dal disturbo se il Ledger tarda
     now = _agenda_now(chat)
-    if status == "pending":
-        return
+    if status == "pending":  # Ledger lento: dopo ~1 s dico al paziente che al momento è occupato
+        return await _ledger_busy(city, key, latest, tone)
 
     # 3. Ricetta non utilizzabile: lo dico chiaramente e indico i passi.
     if status == "ok" and _expired_by_rule(reply, now, chat):
@@ -117,7 +117,7 @@ async def _advance(
         return
 
     priority = (reply.get("priority") or "").upper() or None
-    procedure = reply.get("procedure")
+    procedure = reply.get("procedure"); chat = await _with_world(city, chat, procedure)  # catalogo condiviso
     if not procedure:
         return
 
@@ -162,7 +162,7 @@ async def _advance(
         and not any(row.sender == citizen for row in chat[asked_at + 1 :])
     ):
         return  # ho chiesto la preferenza che mancava: aspetto la risposta
-    if days is None and gender is None and period is None and not asked_prefs and not (replacing or refresh) and priority not in ("U", "B"):  # U/B: ogni giro in piu' costa 15-20 ore di agenda su 24/48
+    if days is None and gender is None and period is None and not asked_prefs and not (replacing or refresh) and priority not in ("U", "B") and not _world_empty(procedure):  # U/B: ogni giro in piu' costa 15-20 ore di agenda su 24/48; catalogo vuoto: inutile
         if "prefs" in sent.lines:
             return
         sent.lines.add("prefs")
@@ -192,8 +192,8 @@ async def _advance(
         if guard and latest is not None:
             await _say(city, citizen, guard)
         return  # le offerte sono già sul tavolo: il cittadino sta scegliendo
-    if now is None:
-        return
+    if now is None:  # nessuna ora di agenda (chiesta per altri, risposta in coda): la chiedo per questo caso
+        return await _agenda_for_case(city, chat, sent, agent)
 
     # 5. Il mondo della mia ASST, pagina per pagina finché trovo qualcosa.
     cancelled = _cancelled_slots(chat, agent, citizen) | _citizen_cancelled(key)
@@ -329,8 +329,8 @@ async def _citizen_declined(city: City, message: Message, key: str) -> None:
         if oid in current and not offer.get("waiting_list") and offer.get("slot_id") not in gone
         and not (now and _offer_at(offer) and _offer_at(offer) <= now)
     ]
-    if still_open:
-        return
+    if still_open:  # rifiuto di una sola offerta: rispondo subito con quelle che restano
+        return await _declined_one(city, key, message, {o: offers[o] for o in still_open}, _tone(chat))
     waiting = [oid for oid, offer in offers.items() if offer.get("waiting_list")]
     if waiting and not any(offer.get("slot_id") and offer["slot_id"] not in gone for offer in offers.values()):
         # Annulla prima di accettare la lista d'attesa: non lo iscrivo e glielo confermo.
@@ -600,7 +600,7 @@ async def _beyond_or_release(
                 intro_text=intro,
             )
             return
-    await _keep_searching(city, key, citizen, tone, len(_our_offers(chat, city.agent_id, citizen)))
+    await _empty_world_alternative(city, chat, key, citizen, number, procedure, priority, tone, note)
 
 
 async def _release(city: City, key: str, citizen: str, number: str | None, tone: str) -> None:

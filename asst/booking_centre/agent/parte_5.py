@@ -167,6 +167,10 @@ def _receipt_for(chat: list[Message], agent: str, citizen: str) -> str | None:
     for row in reversed(_ours(chat, agent, citizen)):
         if "booking.receipt" in line_heads(row.text):
             return row.text
+    for row in reversed(chat):  # ricevuta che la struttura ha già dato al paziente (notified=citizen)
+        if row.sender.startswith("agent:") and "booking.receipt" in line_heads(row.text) and "notified=citizen" in row.text.split():
+            fields = fields_of(row.text)
+            return f"booking.receipt booking_id={fields.get('booking_id', '')} ledger_ref={fields.get('ledger_ref', '')}"
     return None
 
 
@@ -272,6 +276,8 @@ async def _forward_receipt(city: City, message: Message, chat: list[Message], ke
         return
     if not _confirmed_to(chat, city.agent_id, message.sender):
         return  # una ricevuta vale solo dalla struttura a cui abbiamo mandato il confirm
+    if "notified=citizen" in message.text.split():
+        return  # la struttura l'ha già data al paziente: niente doppione
     if _we(chat, city.agent_id, f"booking_id={booking_id}", to=citizen, head="booking.receipt"):
         return
     tone = _tone(chat)
@@ -418,7 +424,7 @@ def _agenda_now(chat: list[Message]) -> datetime | None:
 # pagina), così le offerte partono dopo un giro solo. Solo per la fisiatria: è l'unico servizio con
 # una procedura sola, e le risposte "slots" non dicono a quale procedura appartengono.
 _PREFETCH = {"hospital.physiatry": "VIS-FIS"}
-_PREFETCH_PAGES = (1, 2)  # 21/11: ogni pagina è un turno in coda; 2 coprono ~4 giorni
+_PREFETCH_PAGES = (1,)  # 21/11 pomeriggio: il catalogo ha una pagina sola (page=1/1); la 2 era sempre SCHEMA_INVALID
 
 
 async def _prefetch_world(city: City, chat: list[Message], sent) -> None:
@@ -429,8 +435,8 @@ async def _prefetch_world(city: City, chat: list[Message], sent) -> None:
         "",
     )
     procedure = _PREFETCH.get(service)
-    if not procedure or f"prefetch:{procedure}" in sent.lines:
-        return
+    if not procedure or f"prefetch:{procedure}" in sent.lines or _world_fresh(procedure):
+        return  # catalogo già in memoria: lo riceve il caso dopo la ricetta (_with_world)
     sent.lines.add(f"prefetch:{procedure}")
     for page in _PREFETCH_PAGES:
         await _say(city, LEDGER, f"world procedure={procedure} page={page}")
@@ -528,3 +534,266 @@ def _unasked_offer(message: Message) -> bool:
         and _bare_id(message.sender) not in _ASKED_PARTNERS
         and message.sender not in _team_facilities().values()
     )
+
+
+# --- Ledger lento (21/11 pomeriggio): agenda e rules condivise tra i cittadini ------------------
+# Ogni giro col Ledger costa minuti e il CUP chiedeva agenda e rules per OGNI cittadino: 4
+# richieste a paziente intasavano il Ledger per tutti. Agenda e rules sono le stesse per tutta
+# l'ASST: tengo l'ultima risposta (con sent_at, così _agenda_now la porta avanti col ritmo
+# dell'agenda) e la metto in testa alla storia di ogni caso. Rinfresco solo dopo _SHARED_TTL.
+_SHARED: dict[str, tuple[datetime, Message]] = {}
+_SHARED_TTL = timedelta(minutes=3)
+
+
+def _with_shared_ledger(message: Message, chat: list[Message]) -> list[Message]:
+    if message.sender == LEDGER and first_word(message.text or "") in {"agenda", "rules"}:
+        _SHARED[first_word(message.text)] = (datetime.now(timezone.utc), message)
+    if message.sender == LEDGER and first_word(message.text or "") in {"slots", "world"}:
+        _remember_world(message, chat)
+    have = {row.msg_id for row in chat}
+    extra = [row for _, row in _SHARED.values() if row.msg_id not in have]
+    return [*extra, *chat] if extra else chat
+
+
+# In gara il Relay consegna < 1 messaggio al minuto: le risposte del Ledger restano in coda e la
+# cache non si riempie. Basta averle CHIESTE da poco (per qualunque paziente) per non richiederle:
+# ogni richiesta torna come messaggio in coda davanti ai cittadini.
+_ASKED_AT: dict[str, datetime] = {}
+_RULES_EVERY = 60.0  # dopo un rifiuto le regole si rileggono al massimo una volta al minuto
+
+
+def _shared_fresh(head: str, seconds: float | None = None) -> bool:
+    ttl = _SHARED_TTL if seconds is None else timedelta(seconds=seconds)
+    now = datetime.now(timezone.utc)
+    item = _SHARED.get(head)
+    asked = _ASKED_AT.get(head)
+    return (item is not None and now - item[0] < ttl) or (asked is not None and now - asked < ttl)
+
+
+async def _holding_reply(city: City, chat: list[Message], sent, citizen: str | None = None) -> None:
+    """Primo contatto: il Ledger risponde dopo minuti. Il paziente riceve subito una risposta
+    (rubrica: un messaggio lasciato senza risposta costa -1 a ogni agente del percorso)."""
+
+    citizen = citizen or _citizen(chat)
+    if not citizen or "holding-reply" in sent.lines:
+        _LOG.info("booking.holding.skip", extra={"citizen": bool(citizen)})
+        return
+    sent.lines.add("holding-reply")
+    text = ("Grazie, ho ricevuto il suo messaggio e me ne occupo subito: controllo la ricetta sul "
+            "registro e le propongo le date disponibili appena ho la risposta."
+            if _tone(chat) == "it" else
+            "Thank you, I have your message and I am on it: I am checking the register and I will "
+            "send you the available dates as soon as I have the answer.")
+    await _say(city, citizen, text)
+
+
+async def _declined_one(city: City, key: str, message: Message, remaining: dict[str, dict[str, str]], tone: str) -> None:
+    """Il cittadino rifiuta un'offerta e altre restano aperte: rispondo subito (un messaggio senza
+    risposta costa -1 a ogni agente del percorso), elencando solo le offerte ancora valide."""
+
+    refused = fields_of(message.text).get("offer_id") or message.msg_id
+    listed = [
+        f"- {_when_text(offer.get('agenda_date', ''), tone)}: offer_id={offer_id}"
+        + (f" slot_id={offer['slot_id']}" if offer.get("slot_id") else "")
+        for offer_id, offer in remaining.items()
+    ]
+    head = ("Va bene, tolgo questa data. Restano queste opzioni; se nessuna va bene me lo dica e "
+            "cerco altre date:" if tone == "it" else
+            "All right, I have removed that date. These options are still open; if none of them works, "
+            "just tell me and I will look for other dates:")
+    await _once(city, key, f"declined-one:{refused}", message.sender, head + "\n" + "\n".join(listed))
+
+
+async def _ledger_busy(city: City, key: str, latest: Message | None, tone: str) -> None:
+    """Il Ledger non ha risposto entro ~1 s (_PULL_TRIES): al paziente dico che al momento il
+    registro è occupato, invece di lasciarlo senza risposta. Quando il Ledger risponde, il caso
+    riparte da solo (la risposta arriva come turno a sé) e gli mando le date."""
+
+    if latest is None or not latest.sender.startswith("citizen:"):
+        return
+    text = ("In questo momento il registro è molto occupato e non riesco a risponderle subito. "
+            "Ho preso in carico la sua richiesta e le scrivo appena ho i dati; se preferisce può "
+            "riscrivermi tra qualche minuto." if tone == "it" else
+            "The register is very busy right now and I cannot answer you straight away. I have taken "
+            "your request and I will write to you as soon as I have the data; you can also write to me "
+            "again in a few minutes.")
+    await _once(city, key, f"busy:{latest.msg_id}", latest.sender, text)
+
+
+async def _agenda_for_case(city: City, chat: list[Message], sent, agent: str) -> None:
+    """Il caso non ha l'ora di agenda: la chiedo nel SUO need, così la risposta lo fa ripartire."""
+
+    if "agenda-case" in sent.lines or any(row.text.strip() == "agenda" for row in _ours(chat, agent, LEDGER)):
+        return
+    sent.lines.add("agenda-case")
+    await _say(city, LEDGER, "agenda")
+
+
+# --- catalogo condiviso tra i pazienti (21/11 pomeriggio) ---------------------------------------
+# Ogni paziente chiedeva il suo world (e una pagina 2 che non esiste): 58 richieste in 15 minuti,
+# ognuna una risposta in coda davanti ai cittadini. La pagina è la stessa per tutti quelli con la
+# stessa prestazione: la tengo per prestazione e la do al caso DOPO la ricetta (prestazione nota).
+_WORLD: dict[str, tuple[datetime, dict[str, Message]]] = {}
+_WORLD_TTL = timedelta(minutes=10)
+_WORLD_REFRESH = timedelta(minutes=2)
+
+
+def _ask_key(text: str) -> str:
+    if text.startswith("world "):
+        return "world:" + fields_of(text).get("procedure", "")
+    return text.strip()
+
+
+def _remember_world(message: Message, chat: list[Message]) -> None:
+    head = fields_of((message.text or "").splitlines()[0] if message.text else "")
+    page = head.get("page", "1/1").split("/", 1)[0] or "1"
+    procedure = ""
+    for row in reversed(chat):  # la prestazione della richiesta fatta in questo caso
+        if row.recipient == LEDGER and row.text.startswith("world ") and row.sender != LEDGER:
+            asked = fields_of(row.text)
+            if asked.get("page", "1") == page:
+                procedure = asked.get("procedure", "")
+                break
+    if not procedure:
+        procedure = next((fields_of(line).get("procedure", "") for line in (message.text or "").splitlines()
+                          if "slot_id=" in line), "")
+    if not procedure:
+        return
+    _, pages = _WORLD.get(procedure, (None, {}))
+    pages = dict(pages)
+    pages[page] = message
+    _WORLD[procedure] = (datetime.now(timezone.utc), pages)
+
+
+def _world_fresh(procedure: str | None) -> bool:
+    item = _WORLD.get(procedure or "")
+    return item is not None and datetime.now(timezone.utc) - item[0] < _WORLD_TTL
+
+
+async def _with_world(city: City, chat: list[Message], procedure: str | None) -> list[Message]:
+    """Il caso riceve le pagine del catalogo già lette per la sua prestazione. Se sono vecchie di
+    più di _WORLD_REFRESH chiedo una pagina nuova (una per tutti), senza aspettarla."""
+
+    if not procedure or not _world_fresh(procedure):
+        return chat
+    stamp, pages = _WORLD[procedure]
+    now = datetime.now(timezone.utc)
+    asked = _ASKED_AT.get("world:" + procedure)
+    if now - stamp > _WORLD_REFRESH and (asked is None or now - asked > _WORLD_REFRESH):
+        await _say(city, LEDGER, f"world procedure={procedure} page=1")
+    have = {row.msg_id for row in chat}
+    extra = [row for row in pages.values() if row.msg_id not in have]
+    return [*extra, *chat] if extra else chat
+
+
+def _with_shared(rows: list[Message]) -> list[Message]:
+    """Ogni lettura della storia del caso (anche dentro _until) porta con sé agenda e rules già
+    lette per altri pazienti e il catalogo della prestazione del caso, se la ricetta è nota.
+    Prima solo l'inizio del turno le aveva: le attese le perdevano e il caso richiedeva tutto."""
+
+    have = {row.msg_id for row in rows}
+    extra = [row for _, row in _SHARED.values() if row.msg_id not in have]
+    procedure = ""
+    for row in rows:
+        if row.sender == LEDGER and first_word(row.text) == "prescription":
+            procedure = fields_of(row.text).get("procedure", "") or procedure
+    if procedure and _world_fresh(procedure):
+        extra += [row for row in _WORLD[procedure][1].values() if row.msg_id not in have]
+    return [*extra, *rows] if extra else rows
+
+
+# --- prima risposta con le date (21/11 pomeriggio) ----------------------------------------------
+# La coda del Relay costa ~13 minuti a giro: aspettare la verifica della ricetta prima di proporre
+# le date faceva scadere i percorsi (rubrica: -1 no_booking). Se il paziente nomina un disturbo
+# chiaro, prestazione e priorità sono quelle della tabella del medico (stesse parole chiave del GP):
+# propongo subito le date, con il catalogo già in memoria. Hold e commit restano controllati dal
+# Ledger; con la regola P1 attiva (scadenza da leggere sul Ledger) o un controllo (P) si aspetta.
+_PROVISIONAL = (
+    ("VIS-FIS", "B", ("mal di schiena", "back pain", "dolore alla schiena", "dolori alla schiena",
+                      "male alla schiena", "schiena mi fa male", "mi fa male la schiena", "lombalgia",
+                      "backache", "my back hurts", "lower back", "schiena a pezzi", "male schiena",
+                      "dolore schiena", "schiena fa male", "fa male schiena", "schiena bloccata",
+                      "colpo della strega", "dolore lombare", "mal di reni", "back is killing me",
+                      "back hurts", "my back")),
+    ("VIS-FIS", "D", ("ginocchio", "ginocchia", "knee")),
+    ("VIS-CARD", "B", ("cuore che batte", "heart racing", "palpitazion", "batticuore", "cuore batte",
+                       "cuore accelerato", "heart is racing", "heart pounding", "heart is pounding",
+                       "palpitation", "heart beating fast", "cuore mi batte", "cuore che mi batte",
+                       "batte fortissimo", "batte all'impazzata", "tachicardia", "cuore in gola",
+                       "cuore impazzito", "heart is beating", "heart beats fast")),
+)
+_NOT_PROVISIONAL = ("controllo", "check-up", "checkup", "heart check", "routine")
+_SERVICE_PROCEDURE = {"hospital.physiatry": "VIS-FIS", "specialist_care.cardiology": "VIS-CARD"}
+
+
+def _prescription_or_provisional(chat: list[Message], number: str) -> tuple[str, dict[str, str]]:
+    status, reply = _prescription_ok(chat, number)
+    if status != "pending" or _p1_active(chat) or _agenda_now(chat) is None:
+        return status, reply
+    rows = _from_citizen(chat)
+    text = " ".join((row.text or "").lower().replace("\u2019", "'") for row in rows)
+    if not text or any(word in text for word in _NOT_PROVISIONAL):
+        return status, reply
+    found = {(proc, prio) for proc, prio, words_ in _PROVISIONAL if any(w in text for w in words_)}
+    if len(found) != 1:
+        return status, reply
+    procedure, priority = next(iter(found))
+    service = next((fields_of(row.text).get("service_type", "") for row in rows if "service_type=" in row.text), "")
+    if service and _SERVICE_PROCEDURE.get(service) not in (None, procedure):
+        return status, reply
+    if not _world_fresh(procedure):
+        return status, reply
+    citizen = _citizen(chat) or ""
+    _LOG.info("booking.rx.provisional", extra={"procedure": procedure, "priority": priority})
+    return "ok", {"procedure": procedure, "priority": priority, "patient": citizen,
+                  "prescription_number": number, "provisional": "1"}
+
+
+# --- catalogo vuoto (21/11 pomeriggio): l'alternativa è la lista d'attesa ------------------------
+# Dal 5 gennaio di agenda il catalogo dell'ASST ha matching=0 per tutte le prestazioni: nessuna data
+# esiste, né entro né oltre la scadenza. "Continuo a cercare" chiudeva il percorso in no_reply con
+# -1 (no_alternative). Rubrica: S vuoto + alternativa offerta = 0. Con il catalogo vuoto per la
+# prestazione l'alternativa è la lista d'attesa (testo wl_empty). Con anche un solo slot nel
+# catalogo resta il comportamento di prima (date oltre la scadenza o continuo a cercare).
+
+
+def _world_empty(procedure: str | None) -> bool:
+    """True solo se il catalogo letto da poco per ``procedure`` non ha nessuno slot."""
+
+    if not procedure or not _world_fresh(procedure):
+        return False
+    pages = list(_WORLD[procedure][1].values())
+    if not pages:
+        return False
+    for row in pages:
+        for line in (row.text or "").splitlines()[1:]:
+            fields = fields_of(line)
+            if fields.get("slot_id") and fields.get("procedure", procedure) == procedure:
+                return False
+    return True
+
+
+async def _empty_world_alternative(
+    city: City, chat: list[Message], key: str, citizen: str, number: str | None,
+    procedure: str | None, priority: str | None, tone: str, note: str,
+) -> None:
+    if not _world_empty(procedure):
+        await _keep_searching(city, key, citizen, tone, len(_our_offers(chat, city.agent_id, citizen)))
+        return
+    offer_id = f"wl-{key}"
+    sent = _sent(key)
+    if offer_id in sent.offers or _we(chat, city.agent_id, f"offer_id={offer_id}", to=citizen, head="offer"):
+        return
+    parts = ["offer", f"offer_id={offer_id}", "waiting_list=true"]
+    if procedure:
+        parts.append(f"procedure={procedure}")
+    if priority:
+        parts.append(f"priority={priority}")
+    if number:
+        parts.append(f"prescription_number={number}")
+    prose = tr("wl_empty", tone, label=_label(procedure, tone)) + "\n" + tr("wl_steps", tone)
+    if note:
+        prose = note + "\n" + prose
+    _LOG.info("booking.waiting_list.empty_world", extra={"procedure": procedure or ""})
+    if await _say(city, citizen, prose + "\n" + " ".join(parts)):
+        sent.offers.add(offer_id)

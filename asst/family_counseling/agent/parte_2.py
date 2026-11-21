@@ -55,7 +55,7 @@ async def _citizen_declined(
     """Rifiuto di un'offerta. Se ne restano altre aspetto; quando sono rifiutate tutte cerco
     altri orari (quelli rifiutati restano esclusi) o propongo la lista d'attesa."""
 
-    fresh = await city.history(need_id=message.need_id)
+    fresh = await _case(city, message.need_id)
     if all(row.msg_id != message.msg_id for row in fresh):
         fresh = [*fresh, message]
     gone = _withdrawn(fresh, city.agent_id)
@@ -776,7 +776,7 @@ async def _on_refused(
         # Al cittadino niente codici interni del Ledger (es. STALE_FENCE): un motivo generico.
         shown = "facility_unavailable" if target.startswith("citizen:") else reason
         await _say(city, target, f"cancel offer_id={offer_id} reason={shown}\n{prose}")
-        fresh = await city.history(need_id=message.need_id)
+        fresh = await _case(city, message.need_id)
         await _advance(city, message, fresh, fixed="CONS-GIN", replacing=True)
 
 

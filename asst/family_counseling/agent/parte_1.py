@@ -14,7 +14,8 @@ from city_sdk.city import LEDGER, CapError, City, Message, Need, clinical, under
 _MAX_PAGE = 24  # richieste di pagina per turno: ricerca binaria (~8) o lettura in ordine
 
 
-_LEAD = timedelta(hours=4)
+_LEAD = timedelta(hours=12)  # Ledger lento: hold dopo ~10 h di agenda (EXPIRED)
+_PREFER_MARGIN = timedelta(hours=24)  # slot preferiti: almeno 24 h di agenda di margine
 
 
 _DOCTORS: dict[str, tuple[frozenset[str], str, frozenset[str]]] = {
@@ -139,7 +140,7 @@ async def _handle_turn(need: Need, city: City, message: Message) -> None:
         # Un CUP (di un'altra ASST) cerca posti o conferma uno slot che gli abbiamo offerto.
         if first_word(message.text) == "need.request":
             await _say(city, sender, "Grazie, ricevuto: controllo subito i posti liberi del consultorio.")
-        case = await city.history(need_id=message.need_id)
+        case = await _case(city, message.need_id)
         if first_word(message.text) == "need.request":
             await _serve_partner(city, message, case)
         elif "confirm" in words(message.text):
@@ -147,7 +148,7 @@ async def _handle_turn(need: Need, city: City, message: Message) -> None:
         return
     if not citizen and sender != LEDGER:
         return
-    case = await city.history(need_id=message.need_id)
+    case = await _case(city, message.need_id)
     act = first_word(message.text)
     if citizen:
         interpreted = understood(message)
@@ -256,6 +257,17 @@ def first_word(text: str) -> str:
     return parts[0].strip(".,;:!?()\"'").lower() if parts else ""
 
 
+async def _case(city: City, need_id: str | None) -> list[Message]:
+    """La storia di UN caso. Senza need_id city.history(need_id=None) restituirebbe l'intera
+    mailbox (casi e dati di altri cittadini: rischio -2 over-disclosure, e conformance
+    terminal.exactly_once): resta il solo messaggio in ingresso, come negli altri agenti."""
+
+    if not need_id:
+        inbound = city.inbound
+        return [inbound] if inbound is not None else []
+    return await city.history(need_id=need_id)
+
+
 def fields_of(text: str) -> dict[str, str]:
     found: dict[str, str] = {}
     for token in text.replace(",", " ").split():
@@ -334,7 +346,7 @@ async def _until(
     fresh = chat
     for attempt in range(_PULL_TRIES):
         try:
-            fresh = await city.history(need_id=need_id)
+            fresh = await _case(city, need_id)
         except CapError:
             fresh = chat
         if ready(fresh):
@@ -360,7 +372,7 @@ async def _await_line(
     fresh = chat
     for attempt in range(_PULL_TRIES):
         try:
-            fresh = await city.history(need_id=need_id)
+            fresh = await _case(city, need_id)
         except CapError:
             fresh = chat
         hit = next((row for candidate in (token, *alternate_tokens) if (row := _latest(fresh, head, candidate)) is not None), None)
@@ -455,7 +467,9 @@ def fitting(
             procedure=slot.get("procedure") or procedure or "CONS-GIN",
         )
         chosen.append((at, slot))
-    chosen.sort(key=lambda item: (item[0], item[1].get("slot_id", "")))
+    # Prima gli orari con margine (il Ledger risponde in minuti reali = ore di agenda), poi i vicini.
+    soon = now + _PREFER_MARGIN
+    chosen.sort(key=lambda item: (item[0] < soon, item[0], item[1].get("slot_id", "")))
     return [slot for _, slot in chosen]
 
 

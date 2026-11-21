@@ -34,6 +34,8 @@ async def _say(city: City, to: str, text: str) -> bool:
 
     if to.startswith("agent:"):
         text = _minimise(text)
+    if to == LEDGER and (text.strip() in {"agenda", "rules"} or text.startswith("world ")):
+        _ASKED_AT[_ask_key(text)] = datetime.now(timezone.utc)  # vedi _shared_fresh e _with_world
     try:
         await city.say(to, _fit(text))
     except CapError as err:

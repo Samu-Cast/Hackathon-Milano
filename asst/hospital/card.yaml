@@ -1,7 +1,7 @@
 agent_id: agent:gezf38x5940y
 team: team:epica
 name: hospital
-version: 1.0.21
+version: 1.0.24
 cap_versions:
   - "1.0"
 profiles:

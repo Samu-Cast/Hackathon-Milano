@@ -47,7 +47,11 @@ class LangJourneys(unittest.TestCase):
             await start(t, "en")
             ids = offer_ids(t.said(C))
             self.assertIn("of-S-h1-next", ids)
-            self.assertNotIn("of-S-h3", ids, "mai un posto in lingua sbagliata se esiste quella giusta")
+            # Scelta del CUP (parte_6): prima i medici nella lingua giusta dopo la scadenza, poi come
+            # ULTIMA opzione, dichiarata, quella entro la scadenza in un'altra lingua.
+            self.assertEqual(ids[0], "of-S-h1-next", "prima la lingua giusta")
+            if "of-S-h3" in ids:
+                self.assertEqual(ids[-1], "of-S-h3", "l'altra lingua solo come ultima opzione")
             self.assertFalse(any("reason=released" in x for x in t.said(C)))
         run(go)
 

@@ -232,6 +232,7 @@ async def _partner_view(
 # ricevuta. La mappa sta in memoria del processo; se manca (altro pod) resta il percorso normale.
 _CUP_SLOTS: dict[str, dict[str, str]] = {}
 _CUP_HOLDS: dict[str, str] = {}
+_CUP_PENDING = 900.0  # dopo 15 minuti senza esito del Ledger un nuovo confirm rifà l'hold
 
 
 def _code_of(err: BaseException) -> str:
@@ -257,12 +258,17 @@ async def _fast_confirm(city: City, message: Message) -> bool:
     if not _valid_id(number) and need.startswith("N-") and number.startswith("prescription_number"):
         number = f"prescription_number-{need}"
     known = _CUP_SLOTS.get(slot)
-    if known is not None and known.get("citizen") == citizen and not known.get("cancel"):
-        return True  # stesso confirm già tenuto da questo processo: niente secondo hold
+    if (
+        known is not None and known.get("citizen") == citizen and not known.get("cancel")
+        and time.monotonic() - float(known.get("t", "0")) < _CUP_PENDING
+    ):
+        # Stesso confirm con l'hold ancora in corso: niente secondo hold, ma il CUP sa che ci siamo.
+        await _say(city, message.sender, _ACK)
+        return True
     offer_id = fields.get("offer_id", "")
     cross = fields.get("cross_asst_consent_ref", "")
     _CUP_SLOTS[slot] = {"cup": message.sender, "citizen": citizen, "consent": consent,
-                        "number": number, "offer_id": offer_id}
+                        "number": number, "offer_id": offer_id, "t": str(time.monotonic())}
     parts = ["hold", f"slot_id={slot}"]
     if _valid_id(citizen):
         parts.append(f"citizen={citizen}")
@@ -293,6 +299,8 @@ async def _fast_ledger(city: City, message: Message) -> bool:
     fields = fields_of(message.text or "")
     hold_id = fields.get("hold_id", "") or fields.get("booking_id", "")
     slot = fields.get("slot_id", "") or _CUP_HOLDS.get(hold_id, "")
+    if not slot:  # "refused hold code=EXPIRED detail=slot W01QQQ-...": lo slot è nel testo
+        slot = next((known for known in _CUP_SLOTS if known in (message.text or "")), "")
     entry = _CUP_SLOTS.get(slot)
     if entry is None:
         return False
@@ -314,10 +322,12 @@ async def _fast_ledger(city: City, message: Message) -> bool:
         entry["receipt"] = booking
         line = f"booking.receipt booking_id={booking} ledger_ref={ref} slot_id={slot}"
         line += f" offer_id={offer_id}" if offer_id else ""
-        if not await _say(city, cup, line + " Prenotazione registrata e firmata sul Ledger, grazie."):
-            citizen = entry.get("citizen", "")
-            if citizen.startswith("citizen:"):
-                await _say(city, citizen, line + " Prenotazione confermata: al check-in porti questo numero.")
+        # Anche al paziente, subito: la coda del CUP costa ~13 minuti e senza ricevuta niente check-in.
+        # notified=citizen dice al CUP di non mandargliela una seconda volta.
+        citizen = entry.get("citizen", "")
+        told = citizen.startswith("citizen:") and await _say(
+            city, citizen, line + " Prenotazione confermata: al check-in porti questo numero.")
+        await _say(city, cup, line + (" notified=citizen" if told else "") + " Prenotazione registrata e firmata sul Ledger, grazie.")
         return True
     if head == "refused" and {"hold", "commit"} & words(message.text or ""):
         if entry.get("cancel"):
@@ -328,3 +338,41 @@ async def _fast_ledger(city: City, message: Message) -> bool:
         await _say(city, cup, f"cancel {head_id}slot_id={slot} reason={code} code={code}")
         return True
     return False
+
+
+# --- partner a catalogo vuoto (21/11 pomeriggio) -------------------------------------------------
+# Rubrica: +1 (city:clock) per ogni risposta a un altro agente entro 10 s. Le richieste delle ASST
+# partner aspettavano la lettura della storia (fino a 4 s) e, a catalogo vecchio, il Ledger (6 s e
+# più): alle 15:10 solo il 15% (ospedale) e lo 0% (specialista) entro 10 s. Con il catalogo letto da
+# poco e VUOTO per la nostra prestazione la risposta è comunque "nessuna disponibilità": la do
+# subito. Con anche un solo slot, o senza catalogo recente, resta il percorso normale.
+_EMPTY_AGE = 600.0
+
+
+def _catalog_empty() -> bool:
+    now_t = time.monotonic()
+    recent = [m for t, m in _SEEN if now_t - t <= _EMPTY_AGE and first_word(m.text or "") in {"slots", "world"}]
+    if not recent:
+        return False
+    return not any("slot_id=" in line for m in recent for line in (m.text or "").splitlines()[1:])
+
+
+async def _fast_partner(city: City, message: Message) -> bool:
+    if not message.sender.startswith("agent:") or first_word(message.text or "") != "need.request":
+        return False
+    role = role_of()
+    if role not in ("hospital", "specialist_care"):
+        return False
+    own = "VIS-FIS" if role == "hospital" else "VIS-CARD"
+    fields = fields_of(message.text)
+    procedure = fields.get("procedure") or own
+    if procedure != own or not _catalog_empty():
+        return False
+    request_id = fields.get("request_id") or message.need_id or message.msg_id
+    await _say(city, message.sender,
+               f"cancel reason=no_availability request_id={request_id} procedure={procedure}\n"
+               "Al momento il nostro catalogo non ha posti liberi per questa prestazione. Grazie!")
+    if time.monotonic() - _LAST_ASK[0] > _REFRESH_AFTER:
+        _LAST_ASK[0] = time.monotonic()  # tengo fresco il catalogo, senza aspettare la risposta
+        await _say(city, LEDGER, f"world procedure={procedure} page=1")
+    return True

@@ -104,8 +104,8 @@ async def main(need: Need, city: City) -> None:
         # lungo, così i confirm del CUP non restano in coda dietro decine di slots/agenda.
         _remember_ledger(message)
         return
-    if await _fast_confirm(city, message) or await _fast_ledger(city, message):
-        return  # percorso rapido del nostro CUP: prima di storia, Index e handle
+    if await _fast_confirm(city, message) or await _fast_ledger(city, message) or await _fast_partner(city, message):
+        return  # percorsi rapidi (nostro CUP, partner a catalogo vuoto): prima di storia, Index e handle
     text = message.text or need.summary
     # Rifiuto solo una vera domanda clinica di un cittadino: un check-in o una conferma che
     # nomina una "diagnosi" va registrato (rifiutarlo costa -2).

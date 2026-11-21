@@ -28,6 +28,17 @@ PA, PB = "agent:partnerA-hosp", "agent:partnerB-hosp"
 C1 = "citizen:c1"
 
 
+
+def open_partners(brain) -> None:
+    """Il CUP interpella solo partner note (_lang_partners, rank 0): qui si prova il protocollo
+    con le partner, quindi ogni partner di prova vale come nota."""
+
+    def every(peers, lang):
+        brain._ASKED_PARTNERS.update(brain._bare_id(p.agent_id) for p in peers)
+        return list(peers)
+
+    brain._lang_partners = every
+
 class JourneyFinale(unittest.TestCase):
     def test_percorso_completo_con_rinnovo_partner_e_consenso(self):
         async def go():
@@ -42,6 +53,7 @@ class JourneyFinale(unittest.TestCase):
             t.add(PB, load_brain("hospital"), role="facility", capabilities=("hospital.physiatry",))
             t.peer(PA, role="facility", capabilities=("hospital.physiatry",))
             t.down.add(PA)
+            open_partners(t.agents[BC])
 
             # 1. ricetta, poi scadenza P1
             await t.send(C1, GP, "need.request symptom_code=SYM-BACK Ho mal di schiena", need_id="N-1")

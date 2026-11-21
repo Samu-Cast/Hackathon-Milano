@@ -79,6 +79,7 @@ async def main(need: Need, city: City) -> None:
         chat = []
     if all(row.msg_id != message.msg_id for row in chat):
         chat = [*chat, message]
+    chat = _with_shared_ledger(message, chat)  # agenda e rules già lette per altri cittadini
 
     street = _own_street(city)
     if street and _asks_address(message):
@@ -825,7 +826,10 @@ def fitting(
             continue
         seen.add(slot["slot_id"])
         chosen.append((at, slot))
-    chosen.sort(key=lambda item: (item[0], item[1].get("slot_id", "")))
+    # Prima gli slot con margine (il Ledger risponde in minuti reali = ore di agenda: uno slot
+    # vicino scade prima del commit, reason=past/EXPIRED), poi i vicini. La U resta la più vicina.
+    soon = now + _PREFER_MARGIN
+    chosen.sort(key=lambda item: ((priority or "").upper() != "U" and item[0] < soon, item[0], item[1].get("slot_id", "")))
     return [slot for _, slot in chosen]
 
 

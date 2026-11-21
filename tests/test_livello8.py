@@ -67,6 +67,7 @@ class CambioRegola(unittest.TestCase):
             offers = [fields(l)["offer_id"] for x in t.said(C, "offer") for l in x.splitlines() if l.startswith("offer ")]
             self.assertTrue(offers)
             t.ledger.rules["P1"] = "on"  # la città cambia la regola mentre il percorso è aperto
+            t.agents[BC]._RULES_EVERY = 0  # in gara si rilegge al massimo ogni 60 s: qui il tempo è già passato
             for oid in offers:
                 await t.send(C, BC, f"cancel offer_id={oid} reason=time", need_id="N-1", settle=False)
             await t.settle()

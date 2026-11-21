@@ -43,10 +43,11 @@ _LOG = logging.getLogger("booking_centre")
 # Margine tra "adesso" (agenda) e lo slot: l'agenda corre 60x. Misurato in console il 21/11:
 # con 90 minuti "reason=past" era il rifiuto più frequente (152 su 370); l'offerta partiva
 # ~1,7 h prima dello slot e il cittadino risponde 1,2-1,8 h dopo, poi servono hold e commit.
-_LEAD = timedelta(hours=4)
+_LEAD = timedelta(hours=12)  # 21/11 13:45: il Ledger risponde all'hold dopo ~10 min reali = ~10 h di agenda (EXPIRED)
 # Priorità U (in giornata): con l'ora di agenda aggiornata (_agenda_now) bastano 90 minuti,
 # altrimenti gli slot urgenti dello stesso giorno non verrebbero mai offerti.
 _LEAD_U = timedelta(minutes=90)
+_PREFER_MARGIN = timedelta(hours=24)  # slot preferiti: almeno 24 h di agenda di margine
 
 
 def _lead(priority: str | None) -> timedelta:
@@ -55,7 +56,7 @@ _DEADLINE_DAYS = {"B": 2, "D": 5}
 _MAX_PAGE = 24  # richieste di pagina per turno: ricerca binaria (~8) o lettura in ordine
 _MAX_OFFERS = 3
 _MAX_PARTNERS = 2  # 21/11: con 4 i 2/3 dei messaggi del CUP andavano alle partner (offerte e ack)
-_PULL_TRIES = 3  # 21/11: con 24 riletture un turno durava ~60 s e il pod ne smaltiva 6/min (285 messaggi mai consegnati); la risposta del Ledger arriva comunque come turno a sé
+_PULL_TRIES = 4  # ~1 s di attesa del Ledger, poi si risponde comunque al cittadino. 21/11: con 24 riletture un turno durava ~60 s e il pod ne smaltiva 6/min (285 messaggi mai consegnati); la risposta del Ledger arriva comunque come turno a sé
 _PULL_PAUSE = 0.25
 _SENT_NEEDS = 4096
 _MAX_TEXT = 2000
@@ -914,7 +915,7 @@ async def _case(city: City, need_id: str | None) -> list[Message]:
     if not need_id:
         inbound = city.inbound
         return [inbound] if inbound is not None else []
-    return await city.history(need_id=need_id)
+    return _with_shared(await city.history(need_id=need_id))  # + agenda, rules e catalogo condivisi
 
 
 # --- livello 8: segnali d'allarme (stessa lista in ogni agente che li legge) --------------------

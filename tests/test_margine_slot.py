@@ -43,20 +43,19 @@ class MargineCup(unittest.TestCase):
 
     def test_i_vicini_riempiono_se_i_lontani_sono_pochi(self):
         async def go():
-            t = self._town([3, 5, 26.5])  # un solo slot con margine
+            t = self._town([3, 5, 26.5])  # S0, S1 sotto il limite di 12 h (Ledger lento: EXPIRED)
             await t.send(C, BC, f"need.request prescription_number={RX} lang=it", need_id="N-1")
             await t.send(C, BC, "nessuna preferenza", need_id="N-1")
-            got = slots_of(t)
-            self.assertEqual(got[0], "S2")
-            self.assertEqual(set(got), {"S0", "S1", "S2"}, "niente alternative perse")
+            self.assertEqual(slots_of(t), ["S2"], "sotto le 12 h di agenda non si offre: scadrebbe prima del commit")
         run(go)
 
     def test_solo_slot_vicini_vengono_offerti_comunque(self):
         async def go():
-            t = self._town([3, 5])
+            t = self._town([3, 5])  # nessuno slot prenotabile in tempo
             await t.send(C, BC, f"need.request prescription_number={RX} lang=it", need_id="N-1")
             await t.send(C, BC, "nessuna preferenza", need_id="N-1")
-            self.assertEqual(set(slots_of(t)), {"S0", "S1"})
+            self.assertEqual(slots_of(t), [])
+            self.assertTrue(t.said(C)[-1], "il paziente riceve comunque una risposta")
         run(go)
 
 
@@ -78,7 +77,7 @@ class MargineConsultorio(unittest.TestCase):
 
     def test_i_vicini_riempiono_e_non_si_resta_senza(self):
         async def go():
-            t = self._town([5, 6, 26])
+            t = self._town([13, 14, 26])  # G0, G1 vicini (oltre il limite di 12 h), G2 con margine
             await t.send(C, FC, "need.request vorrei un appuntamento", need_id="N-1")
             got = slots_of(t)
             self.assertEqual(got[0], "G2")

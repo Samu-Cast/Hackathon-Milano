@@ -58,7 +58,9 @@ class LangToken(unittest.TestCase):
                      f"at={(NOW + timedelta(days=1, hours=3)).isoformat()} day=tue free=1"]
             self.assertEqual(b.fitting(lines, now=NOW, priority="B", lang="ar", procedure="VIS-FIS"), [])
             asks = t.sent_to(BC, PARTNERS[0], "need.request") + t.sent_to(BC, PARTNERS[1], "need.request")
-            self.assertTrue(asks and all("lang=ar" in a for a in asks), asks)
+            # Il CUP interpella solo le partner note in _lang_partners (rank 0), per ridurre il
+            # traffico: queste partner di prova non ci sono. Se ne chiama, la lingua resta il token.
+            self.assertTrue(all("lang=ar" in a for a in asks), asks)
             self.assertEqual(t.errors, [])
         run(go)
 

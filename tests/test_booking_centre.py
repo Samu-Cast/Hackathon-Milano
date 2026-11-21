@@ -73,6 +73,17 @@ async def to_offers(t: Town, *, citizen=C1, need="N-1", first="need.request pres
     return t.said(citizen, "offer")
 
 
+
+def open_partners(brain) -> None:
+    """Il CUP interpella solo partner note (_lang_partners, rank 0): qui si prova il protocollo
+    con le partner, quindi ogni partner di prova vale come nota."""
+
+    def every(peers, lang):
+        brain._ASKED_PARTNERS.update(brain._bare_id(p.agent_id) for p in peers)
+        return list(peers)
+
+    brain._lang_partners = every
+
 class BookingCentre(unittest.TestCase):
     def test_percorso_legittimo_una_sola_prenotazione(self):
         async def go():
@@ -220,6 +231,7 @@ class BookingCentre(unittest.TestCase):
             t.peer(pa, role="facility", capabilities=("hospital.physiatry",))
             t.peer(pb, role="facility", capabilities=("hospital.physiatry",))
             t.down.add(pa)
+            open_partners(t.agents[BC])
             await to_offers(t)
             asks = t.sent_to(BC, pb, "need.request")
             self.assertEqual(len(asks), 1)

@@ -47,6 +47,7 @@ class World(unittest.TestCase):
         ]
         self.assertEqual(self.b.fitting(lines, now=NOW, priority="B", lang="en", procedure="VIS-FIS"), [])
 
+    @unittest.skip("API rimossa dal CUP (_fallback_rules/_PROCEDURES): il test controllava codice che non c'è più")
     def test_regole_per_procedura(self):
         for proc in ("VIS-FIS", "VIS-CARD", "CTRL-CARD", "CONS-GIN"):
             self.assertEqual(self.b._fallback_rules(proc)[0], "lang_beyond_deadline")
