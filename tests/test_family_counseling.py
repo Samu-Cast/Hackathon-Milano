@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness import NOW, Ledger, Town, fields, load_brain, run, timedelta  # noqa: E402
 
-FC = "agent:qak7dsxef0g6"
+FC = "agent:drchwbffymha"
 C1, C2 = "citizen:c1", "citizen:c2"
 
 

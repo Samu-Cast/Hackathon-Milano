@@ -14,9 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness import NOW, Ledger, Rx, Town, fields, load_brain, run, timedelta  # noqa: E402
 
-GP = "agent:bdmy1m646zm8"
+GP = "agent:dn90g1skkx0f"
 BC = "agent:jgy1dj2sw2ew"
-HOSP = "agent:mjf6vxpg8vvb"
+HOSP = "agent:gezf38x5940y"
 C1, C2 = "citizen:c1", "citizen:c2"
 
 

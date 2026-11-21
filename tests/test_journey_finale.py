@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness import NOW, Ledger, Town, fields, load_brain, run, timedelta  # noqa: E402
 
-GP, BC, HOSP = "agent:bdmy1m646zm8", "agent:jgy1dj2sw2ew", "agent:mjf6vxpg8vvb"
+GP, BC, HOSP = "agent:dn90g1skkx0f", "agent:jgy1dj2sw2ew", "agent:gezf38x5940y"
 PA, PB = "agent:partnerA-hosp", "agent:partnerB-hosp"
 C1 = "citizen:c1"
 

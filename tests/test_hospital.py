@@ -18,7 +18,7 @@ from harness import NOW, Ledger, Rx, Town, fields, load_brain, run, timedelta  #
 
 BC = "agent:jgy1dj2sw2ew"
 BC2 = "agent:otherdesk"
-HOSP = "agent:mjf6vxpg8vvb"
+HOSP = "agent:gezf38x5940y"
 RX = "prescription_number-N1"
 
 
