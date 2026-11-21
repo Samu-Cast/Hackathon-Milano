@@ -652,7 +652,8 @@ async def _cross_asst(
         "need.request" in line_heads(row.text) and "service_type=" in row.text
         for row in _ours(chat, city.agent_id)
     ):
-        return True
+        # Ricerca già partita: resta aperta solo se qualche partner può ancora rispondere.
+        return bool(_partners_pending(chat, city.agent_id))
     service = _SERVICE_OF.get(procedure)
     if not service:
         return False
@@ -669,7 +670,9 @@ async def _cross_asst(
         and peer.agent_id != city.agent_id
         and peer.role not in {"booking_centre", "gp", "ledger"}
         and (service in peer.capabilities or peer.service == service)
-    ][:_MAX_PARTNERS]
+    ]
+    # MACH-1: prima le strutture pubblicate dalle squadre (e quella con la lingua rara chiesta).
+    partners = _ranked_partners(partners, _lang(chat))[:_MAX_PARTNERS]
     if not partners:
         return False
     sent.flags.add("cross")
@@ -686,6 +689,7 @@ async def _cross_asst(
         deadline = _request_deadline(chat, priority)
         if deadline:
             parts.append(f"deadline={deadline}")
+        parts += _mach_criteria(chat, city.agent_id, citizen)
         text = " ".join(parts) + (
             "\nBuongiorno, il Centro prenotazioni di un'ASST partner cerca disponibilità per "
             "questa prestazione. In questa fase non condividiamo dati del paziente: se avete "
@@ -698,7 +702,8 @@ async def _cross_asst(
     prose = tr("cross_search", tone, label=_label(procedure, tone))
     if note:
         prose = note + "\n" + prose
-    await _once(city, key, "cross_consent", citizen, _consent_head("cross_asst", key) + "\n" + prose)
+    await _once(city, key, "cross_consent", citizen, _consent_message("cross_asst", key, tone, prose))
+    await _wait_partners(city, chat, key, citizen, tone, note)
     return True
 
 
@@ -932,7 +937,7 @@ async def _on_confirm(
             await _locked_free_alternative(city, message, chat, key, facility)
             return
         prose = tr("cross_choice", tone)
-        await _say(city, citizen, _consent_head("cross_asst", key, offer_id) + "\n" + prose)
+        await _say(city, citizen, _consent_message("cross_asst", key, tone, prose, offer_id))
         return
 
     # Sicurezza e fiducia: un consenso non si indovina mai. Se il cittadino non l'ha dato lo
@@ -944,7 +949,11 @@ async def _on_confirm(
     if not booking_ref and not cross_ref:
         if not _we(chat, agent, "purpose=booking", to=citizen, head="consent"):
             prose = tr("booking_consent", tone)
-            await _say(city, citizen, _consent_head("booking", key, offer_id) + "\n" + prose)
+            await _say(city, citizen, _consent_message("booking", key, tone, prose, offer_id))
+        elif _consent_question(message.text):
+            # "Which consent_ref?": non è un rifiuto. Rimando la richiesta con il riferimento.
+            await _once(city, key, f"consent-again:{message.msg_id}", citizen,
+                        _consent_head("booking", key, offer_id) + "\n" + _consent_help("booking", key, tone))
         elif _declined_after(chat, agent, citizen, "booking"):
             prose = tr("booking_declined", tone)
             await _once(city, key, "booking-declined", citizen, prose)
@@ -958,6 +967,8 @@ async def _on_confirm(
         f"consent_ref={cross_ref or booking_ref}",
         f"facility={facility}",
     ]
+    if cross_ref:
+        parts.append(f"cross_asst_consent_ref={cross_ref}")  # MACH-1: serve alla partner per l'hold
     if cross_ref and booking_ref:
         parts.append(f"booking_consent_ref={booking_ref}")
     if number:

@@ -17,9 +17,12 @@ def _minimise(text: str) -> str:
     kept = []
     for line in text.splitlines():
         tokens = []
+        # MACH-1: in una need.request alle partner lang= è un criterio di ricerca (la lingua del
+        # medico), non un dato del cittadino.
+        criteria = line.startswith("need.request") and "service_type=" in line
         for token in line.split(" "):
             key = token.partition("=")[0].strip().lower()
-            if "=" in token and key in _PRIVATE_KEYS:
+            if "=" in token and key in _PRIVATE_KEYS and not (criteria and key == "lang"):
                 continue
             tokens.append(token)
         kept.append(_PII.sub("[omesso]", " ".join(tokens)))
@@ -496,6 +499,8 @@ async def _desk(city: City, message: Message, chat: list[Message]) -> None:
     fields = fields_of(text)
     is_consent = "consent" in heads or bool(fields.get("consent_ref") or _CONSENT_BARE.search(text))
 
+    if not chosen and not fields.get("consent_ref") and await _answer_consent_question(city, chat, key, sender, message):
+        return
     if chosen or ("confirm" in heads and offers):
         await _locked(key, lambda: _on_confirm(city, message, chat, key, chosen))
         return

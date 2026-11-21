@@ -784,7 +784,7 @@ def fitting(
             continue  # ambulatori aperti 08-18
         # Medici di un'ASST partner: valgono solo i loro dati (doctor_lang, doctor_gender), mai
         # la tabella dei nostri medici, che hanno codici simili ma lingue e giorni diversi.
-        spec = known.get(doctor) if partner else _spec(doctor, known)
+        spec = (known.get(doctor) or _partner_spec(doctor, slot.get("facility", ""))) if partner else _spec(doctor, known)
         langs = frozenset(_lang_name(part) for part in _split(slot.get("languages", ""))) or (
             spec[0] if spec else frozenset()
         )

@@ -43,9 +43,46 @@ def _partners_asked(chat: list[Message], agent: str) -> list[str]:
     return asked
 
 
+# Ricerche presso le partner chiuse per tempo scaduto (need_id). Una partner che non risponde
+# entro _PARTNER_WAIT secondi vale come un no: il cittadino non resta mai in attesa infinita.
+_SEARCH_CLOSED: set[str] = set()
+_PARTNER_WAIT = 15.0
+
+
+def _need_of(chat: list[Message]) -> str:
+    return next((row.need_id for row in chat if row.need_id), "") or ""
+
+
+def _stamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat((value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _search_expired(chat: list[Message], agent: str) -> bool:
+    """La ricerca presso le partner è chiusa: tempo scaduto in questo processo, oppure (dagli
+    orari dei messaggi) la prima richiesta è più vecchia di _PARTNER_WAIT secondi."""
+
+    if _PARTNER_WAIT <= 0:
+        return False  # attesa disattivata (solo nei test)
+    if _need_of(chat) in _SEARCH_CLOSED:
+        return True
+    first = next((row for row in chat if row.sender == agent and "need.request" in line_heads(row.text)
+                  and "service_type=" in row.text), None)
+    if first is None:
+        return False
+    started = _stamp(first.sent_at)
+    latest = max((stamp for stamp in (_stamp(row.sent_at) for row in chat) if stamp), default=None)
+    return bool(started and latest and (latest - started).total_seconds() > _PARTNER_WAIT * 2)
+
+
 def _partners_pending(chat: list[Message], agent: str) -> list[str]:
     """Partner interpellate che non hanno ancora risposto (né offerte né no)."""
 
+    if _search_expired(chat, agent):
+        return []
     answered = {
         row.sender for row in chat
         if row.sender.startswith("agent:") and line_heads(row.text) & {"offer", "cancel"}
@@ -362,7 +399,7 @@ def _rejected_doctors(chat: list[Message], agent: str, citizen: str) -> set[str]
 
 _AFFIRM = re.compile(
     r"\b(sì|si|yes|ok|okay|va bene|d'accordo|acconsento|accetto|consento|autorizzo|agree|i agree|"
-    r"i consent|sure|of course|certo|certamente|sí|oui|ja|da|claro|d'acord)\b", re.I)
+    r"i consent|sure|of course|certo|certamente|sí|oui|ja|da|claro|d'acord|sim|так|نعم|是的|是|同意)\b", re.I)
 _NEGATIVE = re.compile(r"\b(no|non|not|don't|do not|nope|never|mai|rifiut\w*|decline\w*|preferisco di no)\b", re.I)
 _CONSENT_WORD = re.compile(r"consent|consenso|permission|permesso|autorizza", re.I)
 _EVERYTHING = re.compile(
@@ -388,7 +425,8 @@ def _consent_question(text: str) -> bool:
     """"Which consent_ref?", "quale consenso?": una domanda, non un rifiuto."""
 
     lowered = _norm(text)
-    return "?" in text and bool(_CONSENT_WORD.search(lowered) or re.search(r"\b(which|quale|cosa|what)\b", lowered))
+    asks = "?" in text or bool(re.match(r"\s*(which|what|how|quale|qual|cosa|come|dove|where)\b", lowered))
+    return asks and bool(_CONSENT_WORD.search(lowered) or re.search(r"\b(which|quale|cosa|what)\b", lowered))
 
 
 def _consent_by_words(chat: list[Message], purpose: str, agent: str, citizen: str) -> str | None:
@@ -428,8 +466,14 @@ async def _consent_followup(city: City, chat: list[Message], key: str, citizen: 
         return False
     tone = _tone(chat)
     if _consent_question(latest.text):
-        await _once(city, key, f"consent-again:{latest.msg_id}", citizen, asked[-1].text)
+        # "Which consent_ref?": non è un rifiuto e non chiude la ricerca. Rimando la richiesta
+        # con il riferimento pronto e spiego come rispondere.
+        offer_id = fields_of(asked[-1].text).get("offer_id", "")
+        await _once(city, key, f"consent-again:{latest.msg_id}", citizen,
+                    _consent_head("cross_asst", key, offer_id) + "\n" + _consent_help("cross_asst", key, tone))
         return True
+    if not _partners_pending(chat, agent):
+        return False  # le partner hanno già risposto (o il tempo è scaduto): niente "sto aspettando"
     if _affirmative(latest.text) or fields_of(latest.text).get("consent_ref") or _CONSENT_BARE.search(latest.text):
         text = ("Grazie, ho registrato il suo consenso. Sto aspettando le disponibilità delle ASST partner: "
                 "le scrivo appena arrivano."
@@ -439,3 +483,158 @@ async def _consent_followup(city: City, chat: list[Message], key: str, citizen: 
         await _once(city, key, "cross-consent-ack", citizen, text)
         return True
     return False
+
+
+# --- MACH-1: standard comune tra ASST (RED-AGENT, accettato dalle squadre su Discord) ----------
+# Gli id li hanno pubblicati le squadre: sono dichiarati, non verificati. Servono solo a mettere
+# per prime le strutture note e in fondo (o fuori) gli agenti impostori che arrivano dal 21/11.
+_TRUSTED_ASST: dict[str, str] = {}
+for _asst, _ids in (
+    ("giambellino", "cdc7x6m21nj6 c32jyk0cyan7 h6r1v45esk77 hnpe58epeyh1 bzs050xacs1m"),
+    ("lambrate", "gdrf9b9kxxss c2ewegr2ea3v nanpr5mgm2py pky3vqyqbepa atp772whjkgd"),
+    ("nord", "psxp8bh1feaa wwxaphfb5pfh gpr1zqe343gb zand0f57ec1j ccjzqm7yekwx"),
+    ("greco", "h3n6kfd18r3g bmrcsmqq6at2 xtj1dk9x3qej q18es2d82f8r pxvd2kk2yx5j"),
+    ("bicocca", "ez8cb7j167p2 rng5wcrzvhsj bb01ggxymm05 sh35cbsy287d nkh372rd16yq"),
+    ("bovisa", "vgtmj5nqfkxj h82xpx3rkn9e gxq3vzgt3h5t tty8erdj6t41 txar5994gbkj"),
+    ("lorenteggio", "qtjne8symjas w2qsptc9qqhg tmt0bcv0st1f n9bf9y6670hp mcppmrbjvxag"),
+    ("isola", "etpwrfmfa8hm mkfzagfe8jtt"),
+):
+    for _id in _ids.split():
+        _TRUSTED_ASST[f"agent:{_id}"] = _asst
+# Lingua rara del fisiatra h3 di ogni ASST (tabella MACH-1 e messaggi delle squadre).
+_RARE_LANG_ASST = {
+    "ka": "giambellino", "ro": "toros", "ur": "nord", "fr": "corvetto", "sq": "gorla", "fa": "brera",
+    "tl": "isola", "wo": "ortica", "si": "greco", "ti": "bicocca", "de": "forlanini", "ja": "lambrate",
+}
+_RARE_OF_ASST = {asst: lang for lang, asst in _RARE_LANG_ASST.items()}
+
+
+def _bare_id(agent_id: str) -> str:
+    return (agent_id or "").split("@", 1)[0].strip().lower()
+
+
+def _trusted(agent_id: str) -> bool:
+    return _bare_id(agent_id) in _TRUSTED_ASST
+
+
+def _partner_rank(agent_id: str, lang: str) -> int:
+    """0: struttura nota dell'ASST la cui lingua rara è quella chiesta; 1: struttura nota;
+    2: agente che nessuna squadra ha pubblicato (possibile impostore, va in fondo)."""
+
+    asst = _TRUSTED_ASST.get(_bare_id(agent_id))
+    if asst and _RARE_LANG_ASST.get(lang) == asst:
+        return 0
+    return 1 if asst else 2
+
+
+def _ranked_partners(peers: list, lang: str) -> list:
+    return sorted(peers, key=lambda peer: _partner_rank(peer.agent_id, lang))
+
+
+def _partner_spec(doctor: str, facility: str):
+    """Medico di un'ASST partner che non ha mandato doctor_lang/doctor_gender. Ogni ASST ha gli
+    stessi medici (kit, e lo confermano le squadre): vale la tabella comune, tranne per h3, la cui
+    lingua rara cambia da ASST a ASST e la deduco solo da una struttura nota."""
+
+    key = _doctor_key(doctor)
+    if key == "h3":
+        rare = _RARE_OF_ASST.get(_TRUSTED_ASST.get(_bare_id(facility), ""))
+        return (frozenset({rare}), "m", frozenset({"tue", "thu"})) if rare else None
+    return _DOCTORS.get(key)
+
+
+def _mach_criteria(chat: list[Message], agent: str, citizen: str) -> list[str]:
+    """Criteri facoltativi di MACH-1 per need.request: lingua del medico, genere, giorni.
+    Sono preferenze di ricerca, non dati del cittadino."""
+
+    parts: list[str] = []
+    lang = _lang(chat)
+    if lang and lang != "it":
+        parts.append(f"lang={lang}")
+    days, gender, _ = _preferences(chat, agent, citizen)
+    if gender in ("f", "m"):
+        parts.append(f"gender_preference={gender}")
+    if days:
+        parts.append("days=" + "/".join(code for code in _DAYS if code in days))
+    return parts
+
+
+_CONSENT_HELP = {
+    "it": "Per darmi il consenso risponda pure con: consent purpose={p} consent_ref={ref} (oppure scriva semplicemente «sì»).",
+    "en": "Please reply with: consent purpose={p} consent_ref={ref} (or simply write \"yes\").",
+    "es": "Por favor, responda con: consent purpose={p} consent_ref={ref} (o escriba simplemente «sí»).",
+    "fr": "Merci de répondre avec : consent purpose={p} consent_ref={ref} (ou écrivez simplement « oui »).",
+    "pt": "Por favor, responda com: consent purpose={p} consent_ref={ref} (ou escreva simplesmente «sim»).",
+    "de": "Bitte antworten Sie mit: consent purpose={p} consent_ref={ref} (oder schreiben Sie einfach „ja“).",
+    "ro": "Vă rog să răspundeți cu: consent purpose={p} consent_ref={ref} (sau scrieți simplu „da”).",
+    "ar": "يرجى الرد بـ: consent purpose={p} consent_ref={ref} (أو اكتبوا ببساطة «نعم»).",
+    "zh": "请回复： consent purpose={p} consent_ref={ref} （或者直接回复“是”）。",
+    "uk": "Будь ласка, дайте відповідь: consent purpose={p} consent_ref={ref} (або просто напишіть «так»).",
+}
+
+
+def _consent_help(purpose: str, key: str, tone: str) -> str:
+    """Come rispondere alla richiesta di consenso, con il riferimento già pronto ("Which
+    consent_ref?"). I token sono staccati dalla punteggiatura: chi li legge trova lo stesso
+    consent_ref della prima riga."""
+
+    template = _CONSENT_HELP.get(tone) or _CONSENT_HELP["en"]
+    return template.format(p=purpose, ref=f"cons-{key}-{purpose}")
+
+
+def _consent_message(purpose: str, key: str, tone: str, prose: str, offer_id: str = "") -> str:
+    return _consent_head(purpose, key, offer_id) + "\n" + prose + "\n" + _consent_help(purpose, key, tone)
+
+
+async def _wait_partners(city: City, chat: list[Message], key: str, citizen: str, tone: str, note: str) -> None:
+    """Dopo le richieste alle partner aspetto le risposte al massimo _PARTNER_WAIT secondi, nello
+    stesso turno. Poi chiudo la ricerca: offro le loro opzioni compatibili oppure l'alternativa.
+    Le offerte che arrivano dopo restano di riserva (_on_partner_offer)."""
+
+    if _PARTNER_WAIT <= 0:
+        return  # attesa disattivata (solo nei test): le risposte arrivano nei turni successivi
+    agent = city.agent_id
+    need = _need_of(chat)
+    tries = max(1, int(_PARTNER_WAIT / _PULL_PAUSE)) if _PULL_PAUSE > 0 else _PULL_TRIES
+    fresh = chat
+    for attempt in range(tries):
+        try:
+            fresh = await city.history(need_id=need or None)
+        except CapError:
+            fresh = chat
+        if not _partners_pending(fresh, agent):
+            break
+        if attempt + 1 < tries:
+            await asyncio.sleep(_PULL_PAUSE)
+    if need:
+        _SEARCH_CLOSED.add(need)
+    if len(_SEARCH_CLOSED) > 5000:
+        _SEARCH_CLOSED.clear()
+    number = _number(fresh)
+    _, reply = _prescription_ok(fresh, number) if number else ("pending", {})
+    priority = (reply.get("priority") or "").upper() or None
+    procedure = reply.get("procedure")
+    if await _offer_partner_reserve(
+        city, fresh, key, citizen, number, procedure, priority, tone, "",
+        replacing=False, exclude_offered=True,
+    ):
+        return
+    if not _offered_slots(fresh, agent, citizen):
+        await _no_slot_fallback(city, fresh, key, citizen, number, procedure, priority, tone, note="")
+
+
+async def _answer_consent_question(city: City, chat: list[Message], key: str, citizen: str, message: Message) -> bool:
+    """"Which consent_ref?" in qualunque momento: rimando l'ultima richiesta di consenso con il
+    riferimento pronto e le istruzioni. Non è un rifiuto e non chiude nulla."""
+
+    if not _consent_question(message.text):
+        return False
+    asked = [row for row in _ours(chat, city.agent_id, citizen) if "consent" in line_heads(row.text)]
+    if not asked:
+        return False
+    fields = fields_of(asked[-1].text)
+    purpose = fields.get("purpose", "booking")
+    tone = _tone(chat)
+    await _once(city, key, f"consent-again:{message.msg_id}", citizen,
+                _consent_head(purpose, key, fields.get("offer_id", "")) + "\n" + _consent_help(purpose, key, tone))
+    return True
