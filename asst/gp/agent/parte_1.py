@@ -14,7 +14,7 @@ import os
 import re
 from collections import OrderedDict
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from city_sdk.city import LEDGER, CapError, City, Message, Need, OutOfScope, clinical, understood
@@ -288,6 +288,11 @@ def fields_of(text: str) -> dict[str, str]:
     return found
 
 
+# Ora di Milano: a novembre-febbraio (la gara) è UTC+1. Il Ledger scrive gli orari in UTC,
+# ma cittadino, fasce 08-18 e confronti devono usare l'ora di Milano.
+_MILAN = timezone(timedelta(hours=1))
+
+
 def _when(value: str) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -295,7 +300,7 @@ def _when(value: str) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         return None
-    return parsed
+    return parsed.astimezone(_MILAN)
 
 
 def _citizen(chat: list[Message]) -> str | None:

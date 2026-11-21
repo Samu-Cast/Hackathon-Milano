@@ -612,12 +612,14 @@ async def _on_held(city: City, message: Message, chat: list[Message]) -> None:
     if not consent:
         _LOG.info("care.held.noconsent", extra={"need_id": need[:48]})
         return
-    parts = [
-        "commit",
-        f"hold_id={hold_id}",
-        f"consent_ref={consent}",
-        f"fence={fields.get('fence', '1')}",
-    ]
+    # Il fence è quello della riga held che ha creato questo hold (il Ledger lo chiama fence o
+    # simile). Non lo indovino con un default: senza, il Ledger risponde STALE_FENCE.
+    fence = next((value for key, value in fields.items() if "fence" in key.lower()), "")
+    if not fence:
+        _LOG.info("care.held.nofence", extra={"need_id": need[:48]})
+    parts = ["commit", f"hold_id={hold_id}", f"consent_ref={consent}"]
+    if fence:
+        parts.append(f"fence={fence}")
     await _say(city, LEDGER, " ".join(parts))
 
 
@@ -720,7 +722,9 @@ async def _on_refused(
             else "Mi dispiace: l'orario scelto non è più disponibile. Non dipende da lei: sto già "
             "cercando un'alternativa."
         )
-        await _say(city, target, f"cancel offer_id={offer_id} reason={reason}\n{prose}")
+        # Al cittadino niente codici interni del Ledger (es. STALE_FENCE): un motivo generico.
+        shown = "facility_unavailable" if target.startswith("citizen:") else reason
+        await _say(city, target, f"cancel offer_id={offer_id} reason={shown}\n{prose}")
         fresh = await city.history(need_id=message.need_id)
         await _advance(city, message, fresh, fixed="CONS-GIN", replacing=True)
 

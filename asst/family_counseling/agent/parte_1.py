@@ -33,7 +33,7 @@ _DEADLINE_DAYS = {"B": 2, "D": 5}
 _LOG = logging.getLogger("care")
 
 
-_PULL_TRIES = 24
+_PULL_TRIES = 60  # 15 s: il Ledger può rispondere dopo qualche secondo
 
 
 _PULL_PAUSE = 0.25
@@ -262,12 +262,17 @@ def fields_of(text: str) -> dict[str, str]:
     return found
 
 
+# Ora di Milano: a novembre-febbraio (la gara) è UTC+1. Il Ledger scrive gli orari in UTC,
+# ma cittadino, fasce 08-18 e confronti devono usare l'ora di Milano.
+_MILAN = timezone(timedelta(hours=1))
+
+
 def _when(value: str) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).astimezone(_MILAN)
 
 
 def _citizen(chat: list[Message]) -> str | None:

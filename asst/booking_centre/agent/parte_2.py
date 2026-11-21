@@ -152,6 +152,11 @@ def _injection(text: str) -> bool:
     return any(marker in lowered for marker in _INJECTION)
 
 
+# Ora di Milano: a novembre-febbraio (la gara) è UTC+1. Il Ledger scrive gli orari in UTC,
+# ma cittadino, fasce 08-18 e confronti devono usare l'ora di Milano.
+_MILAN = timezone(timedelta(hours=1))
+
+
 def _when(value: str) -> datetime | None:
     """Un istante ISO. Senza fuso orario lo leggo come UTC, così agenda e slot restano
     confrontabili anche se il Ledger li scrive in forma breve."""
@@ -164,7 +169,7 @@ def _when(value: str) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+    return parsed.astimezone(_MILAN)
 
 
 def _day_code(value: str) -> str:
